@@ -319,13 +319,14 @@ fun CardFrame(found: Boolean, modifier: Modifier = Modifier) {
                 )
             }
 
-            // Zona del código: se desvanece al detectar
+            // Zona del código: en la carta va al final de la línea de copyright, a la izquierda del
+            // número de poder (abajo a la derecha). Se desvanece al detectar
             if (progress < 1f) {
                 val cw = r.width * 0.34f
-                val ch = r.height * 0.08f
+                val ch = r.height * 0.07f
                 drawRoundRect(
                     Color.White.copy(alpha = 1f - progress),
-                    Offset(r.right - cw - r.width * 0.03f, r.bottom - ch - r.height * 0.02f),
+                    Offset(r.left + r.width * 0.34f, r.bottom - ch - r.height * 0.01f),
                     GSize(cw, ch),
                     CornerRadius(4.dp.toPx()),
                     style = Stroke(2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))),
