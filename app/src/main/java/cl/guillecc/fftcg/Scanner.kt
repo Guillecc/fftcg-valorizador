@@ -11,6 +11,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,16 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size as GSize
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -128,6 +139,7 @@ fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier 
 
     Box(modifier) {
         AndroidView({ previewView }, Modifier.fillMaxSize())
+        CardFrame(found = paused, modifier = Modifier.fillMaxSize())
         FilledTonalButton(
             onClick = {
                 torch = !torch
@@ -135,5 +147,44 @@ fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier 
             },
             modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
         ) { Text(if (torch) "Linterna: sí" else "Linterna: no") }
+    }
+}
+
+/**
+ * Guía para encuadrar la carta (proporción 63×88 mm): oscurece el resto de la imagen y marca
+ * con línea punteada dónde va el código (abajo a la derecha). Se pone verde al reconocer una carta.
+ */
+@Composable
+fun CardFrame(found: Boolean, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        var h = size.height * 0.9f
+        var w = h * 63f / 88f
+        if (w > size.width * 0.82f) {
+            w = size.width * 0.82f
+            h = w * 88f / 63f
+        }
+        val left = (size.width - w) / 2
+        val top = (size.height - h) / 2
+        val radius = CornerRadius(w * 0.045f)
+        val color = if (found) Color(0xFF5BD47A) else Color.White
+
+        val outside = Path().apply {
+            fillType = PathFillType.EvenOdd
+            addRect(Rect(Offset.Zero, size))
+            addRoundRect(RoundRect(left, top, left + w, top + h, radius))
+        }
+        drawPath(outside, Color.Black.copy(alpha = 0.5f))
+        drawRoundRect(color, Offset(left, top), GSize(w, h), radius, style = Stroke(3.dp.toPx()))
+
+        // Zona del código
+        val cw = w * 0.34f
+        val ch = h * 0.08f
+        drawRoundRect(
+            color,
+            Offset(left + w - cw - w * 0.03f, top + h - ch - h * 0.02f),
+            GSize(cw, ch),
+            CornerRadius(4.dp.toPx()),
+            style = Stroke(2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))),
+        )
     }
 }

@@ -358,13 +358,13 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
         CameraScanner(
             paused = found.isNotEmpty(),
             onCode = { key -> found = CardIndex.lookup(key) },
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1.5f),
         )
         Column(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)) {
             if (found.isEmpty()) {
                 Text(
-                    "Apunta al código de la esquina inferior derecha de la carta (ej: 1-001H). " +
-                        "Acerca la cámara hasta que se lea nítido.",
+                    "Encuadra la carta en el marco, con el código (ej: 1-001H) dentro de la zona punteada. " +
+                        "Si no lo lee, acerca la cámara al código.",
                     Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
