@@ -59,6 +59,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -95,6 +96,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -145,6 +147,7 @@ fun AppScreen() {
     var available by remember { mutableStateOf<Update?>(null) } // versión nueva: muestra el aviso en Colección
     var updating by remember { mutableStateOf<Update?>(null) } // diálogo de actualización abierto
     val tray = remember { BatchTray() } // bandeja del modo Lote: sobrevive al cambio de pestaña
+    var undoJob by remember { mutableStateOf<Job?>(null) } // aviso "Quitaste…" con Deshacer pendiente
 
     fun persist() {
         Collection.saveAsync(ctx, entries.toList()) { e ->
@@ -156,6 +159,23 @@ fun AppScreen() {
         entries.clear()
         entries.addAll(list)
         persist()
+    }
+
+    /** Quita una línea al tiro y ofrece Deshacer; una nueva eliminación reemplaza el Deshacer anterior. */
+    fun removeWithUndo(e: Entry) {
+        val i = entries.indexOfFirst { it.id == e.id && it.foil == e.foil }
+        if (i < 0) return
+        val removed = entries[i]
+        replace(entries.filterIndexed { j, _ -> j != i })
+        undoJob?.cancel() // cancelar showSnackbar cierra el aviso anterior
+        undoJob = scope.launch {
+            val name = CardIndex.byId(removed.id)?.name ?: "Carta ${removed.id}"
+            val r = snack.showSnackbar("Quitaste $name", actionLabel = "Deshacer", duration = SnackbarDuration.Long)
+            // Si mientras tanto se volvió a agregar la misma línea, no se duplica
+            if (r == SnackbarResult.ActionPerformed && entries.none { it.id == removed.id && it.foil == removed.foil }) {
+                replace(entries.toMutableList().apply { add(i.coerceAtMost(size), removed) })
+            }
+        }
     }
 
     suspend fun refresh(force: Boolean) {
@@ -253,6 +273,7 @@ fun AppScreen() {
                             onRefresh = { scope.launch { refresh(force = true); snack.showSnackbar("Precios al ${CardIndex.updated}") } },
                             onCheckUpdate = { checkUpdate() },
                             onMessage = { scope.launch { snack.showSnackbar(it) } },
+                            onRemove = { removeWithUndo(it) },
                         )
                     }
                 }
@@ -306,6 +327,7 @@ fun CollectionScreen(
     onRefresh: () -> Unit,
     onCheckUpdate: () -> Unit,
     onMessage: (String) -> Unit,
+    onRemove: (Entry) -> Unit,
 ) {
     val ctx = LocalContext.current
     val installed = remember { Updater.installedVersion(ctx) }
@@ -464,13 +486,16 @@ fun CollectionScreen(
             groups.forEach { g ->
                 stickyHeader(key = "set-${g.groupId}") { SetHeader(g) }
                 items(g.lines, key = { (e, _) -> "${e.id}-${e.foil}" }) { (e, c) ->
-                    EntryRow(e, c, rank = null, onClick = { detail = e.id to e.foil })
+                    EntryRow(e, c, rank = null, onClick = { detail = e.id to e.foil }, onRemove = { onRemove(e) })
                 }
             }
         } else {
             itemsIndexed(rows, key = { _, (e, _) -> "${e.id}-${e.foil}" }) { i, (e, c) ->
                 // El ranking #1–#10 solo tiene sentido ordenando por valor total
-                EntryRow(e, c, rank = if (sort == SortBy.TOTAL) i else null, onClick = { detail = e.id to e.foil })
+                EntryRow(
+                    e, c, rank = if (sort == SortBy.TOTAL) i else null,
+                    onClick = { detail = e.id to e.foil }, onRemove = { onRemove(e) },
+                )
             }
         }
     }
@@ -559,7 +584,7 @@ fun CollectionScreen(
 
 /** Fila de una línea de la colección; [rank] (índice en la lista) muestra "#1"–"#10" a las de más valor. */
 @Composable
-private fun EntryRow(e: Entry, c: CardInfo?, rank: Int?, onClick: () -> Unit) {
+private fun EntryRow(e: Entry, c: CardInfo?, rank: Int?, onClick: () -> Unit, onRemove: () -> Unit) {
     val unit = e.unit(c)
     CardRow(
         card = c,
@@ -572,6 +597,7 @@ private fun EntryRow(e: Entry, c: CardInfo?, rank: Int?, onClick: () -> Unit) {
         warning = c != null && c.finish(e.foil) != null && !c.inStock(e.foil),
         trend = entryChange(e, c, 7),
         onClick = onClick,
+        onRemove = onRemove,
     )
 }
 
@@ -950,9 +976,14 @@ fun CardRow(
     warning: Boolean = false,
     note: String? = null,
     trend: Double? = null, // cambio de precio a 7 días (0.12 = +12 %)
+    onRemove: (() -> Unit)? = null, // muestra una "×" al final de la fila (solo en Colección)
 ) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // Con "×", el margen derecho lo da el propio botón (su zona táctil ya deja aire alrededor del ícono)
+        Row(
+            Modifier.padding(start = 8.dp, top = 8.dp, bottom = 8.dp, end = if (onRemove != null) 0.dp else 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             AsyncImage(
                 model = card?.image, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.size(width = 48.dp, height = 67.dp).clip(RoundedCornerShape(4.dp)),
@@ -979,6 +1010,15 @@ fun CardRow(
                 val trendText = trendLabel(trend)
                 if (trendText != null && trend != null) {
                     Text(trendText, fontSize = 12.sp, color = if (trend > 0) TrendUp else TrendDown, maxLines = 1)
+                }
+            }
+            // Después del precio, que conserva su ancho: lo que se recorta es el título
+            if (onRemove != null) {
+                IconButton(onClick = onRemove, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        AppIcons.Close, contentDescription = "Quitar de la colección",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp),
+                    )
                 }
             }
         }

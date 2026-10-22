@@ -84,7 +84,7 @@ import kotlin.math.sin
 data class ScanHit(val key: String, val known: Boolean, val text: String)
 
 /**
- * Lee el código impreso abajo a la derecha de la carta ("1-001H", "PR-029", "Re-001H/12-002H").
+ * Lee el código impreso abajo en la carta ("1-001H", "PR-029", "Re-001H/12-002H").
  * Corrige confusiones típicas del OCR. Un código del índice se acepta tras dos cuadros seguidos;
  * uno con forma válida que no está en el índice, tras tres (más estricto para no reportar ruido).
  */
@@ -254,7 +254,7 @@ private fun frameRect(width: Float, height: Float): Rect {
 
 /**
  * Guía para encuadrar la carta (proporción 63×88 mm): oscurece el resto de la imagen, marca las
- * esquinas y con línea punteada dónde va el código (abajo a la derecha). Mientras busca, una línea
+ * esquinas y con línea punteada dónde va el código (abajo a la izquierda). Mientras busca, una línea
  * recorre la carta; al reconocerla se pone verde con un pulso y muestra un check.
  */
 @Composable
@@ -341,14 +341,18 @@ fun CardFrame(found: Boolean, modifier: Modifier = Modifier) {
                 )
             }
 
-            // Zona del código: en la carta va al final de la línea de copyright, a la izquierda del
-            // número de poder (abajo a la derecha). Se desvanece al detectar
+            // Zona del código: en las cartas del dueño va impreso abajo a la izquierda, así que el recuadro
+            // queda dentro de la esquina en L inferior izquierda, con margen (grosor de la esquina + 4dp)
+            // para no tocar su trazo. Se desvanece al detectar
             if (progress < 1f) {
-                val cw = r.width * 0.34f
+                val cw = r.width * 0.36f
                 val ch = r.height * 0.07f
+                val clear = 8.dp.toPx()
+                val cx = r.left + (r.width * 0.04f).coerceAtLeast(clear)
+                val cy = r.bottom - (r.height * 0.02f).coerceAtLeast(clear) - ch
                 drawRoundRect(
                     Color.White.copy(alpha = 1f - progress),
-                    Offset(r.left + r.width * 0.34f, r.bottom - ch - r.height * 0.01f),
+                    Offset(cx, cy),
                     GSize(cw, ch),
                     CornerRadius(4.dp.toPx()),
                     style = Stroke(2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f))),
