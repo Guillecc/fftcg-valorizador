@@ -12,11 +12,14 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -26,6 +29,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -140,13 +144,21 @@ fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier 
     Box(modifier) {
         AndroidView({ previewView }, Modifier.fillMaxSize())
         CardFrame(found = paused, modifier = Modifier.fillMaxSize())
-        FilledTonalButton(
-            onClick = {
-                torch = !torch
-                camera?.cameraControl?.enableTorch(torch)
-            },
-            modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-        ) { Text(if (torch) "Linterna: sí" else "Linterna: no") }
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(8.dp).size(44.dp).clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.45f))
+                .clickable {
+                    torch = !torch
+                    camera?.cameraControl?.enableTorch(torch)
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                AppIcons.Bolt, contentDescription = "Linterna",
+                tint = if (torch) Color(0xFFF59E0B) else Color.White,
+                modifier = Modifier.size(22.dp),
+            )
+        }
     }
 }
 

@@ -4,8 +4,12 @@ import android.content.Context
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.net.URLEncoder
 import java.text.Normalizer
 import java.util.zip.GZIPInputStream
+
+/** Precios de una terminación: mercado (ventas recientes) y más bajo publicado (null = sin stock). */
+data class Finish(val market: Double?, val low: Double?)
 
 /** Una impresión de una carta en TCGplayer (código + versión: base, Full Art, promo…). */
 data class CardInfo(
@@ -16,13 +20,26 @@ data class CardInfo(
     val set: String,
     val setAbbr: String,
     val rarity: String,
-    val normal: Double?,
-    val foil: Double?,
+    val normal: Finish?, // null = TCGplayer no tiene esa terminación
+    val foil: Finish?,
 ) {
     /** Página de TCGplayer: ahí se ven las "Latest Sales". */
     val url get() = "https://www.tcgplayer.com/product/$id"
     val image get() = "https://tcgplayer-cdn.tcgplayer.com/product/${id}_in_400x400.jpg"
-    fun price(foil: Boolean): Double? = if (foil) this.foil else normal
+
+    /** Solo existe en foil (ej: promos Full Art). */
+    val defaultFoil get() = normal == null && foil != null
+
+    fun finish(foil: Boolean): Finish? = if (foil) this.foil else normal
+    fun price(foil: Boolean): Double? = finish(foil)?.let { it.market ?: it.low }
+    fun inStock(foil: Boolean): Boolean = finish(foil)?.low != null
+
+    /** Búsqueda de vendidos en eBay. */
+    fun ebayUrl(foil: Boolean): String {
+        var q = "FFTCG ${code.substringBefore('/')} $name"
+        if (foil && !name.contains("Full Art", ignoreCase = true)) q += " foil"
+        return "https://www.ebay.com/sch/i.html?_nkw=${URLEncoder.encode(q, "UTF-8")}&LH_Sold=1&LH_Complete=1"
+    }
 }
 
 /**
@@ -110,6 +127,17 @@ object CardIndex {
     private fun normalize(s: String) =
         Normalizer.normalize(s, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
 
+    /** "pn"/"ln" (o "pf"/"lf"): sin ninguna de las dos claves, la terminación no existe. */
+    private fun finish(c: JSONObject, tag: String): Finish? {
+        val p = "p$tag"
+        val l = "l$tag"
+        if (!c.has(p) && !c.has(l)) return null
+        return Finish(
+            market = if (c.isNull(p)) null else c.getDouble(p),
+            low = if (c.isNull(l)) null else c.getDouble(l),
+        )
+    }
+
     private fun parse(f: File): Index {
         val root = JSONObject(GZIPInputStream(f.inputStream()).bufferedReader().use { it.readText() })
         val sets = root.getJSONObject("sets")
@@ -126,8 +154,8 @@ object CardIndex {
                 set = set?.optString(0).orEmpty(),
                 setAbbr = set?.optString(1).orEmpty(),
                 rarity = c.optString("r"),
-                normal = if (c.isNull("pn")) null else c.getDouble("pn"),
-                foil = if (c.isNull("pf")) null else c.getDouble("pf"),
+                normal = finish(c, "n"),
+                foil = finish(c, "f"),
             )
         }
         val byKey = HashMap<String, MutableList<CardInfo>>()

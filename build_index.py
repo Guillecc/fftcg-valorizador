@@ -16,7 +16,8 @@ from valorizar import build_index, code_key, load_catalog
 
 def main(out: str) -> None:
     catalog = load_catalog(refresh=False)
-    index, prices = build_index(catalog)
+    index, _ = build_index(catalog)
+    rows = {(r["productId"], r["subTypeName"]): r for r in catalog["prices"]}
 
     cards, seen = [], set()
     for products in index.values():
@@ -26,16 +27,15 @@ def main(out: str) -> None:
                 continue
             seen.add(pid)
             keys = [f"{k[0]}-{k[1]}" for k in map(code_key, p["_number"].split("/")) if k]
-            cards.append({
-                "id": pid,
-                "c": p["_number"],
-                "k": keys,
-                "n": p["name"],
-                "g": p["groupId"],
-                "r": p["_rarity"],
-                "pn": prices.get((pid, "Normal")),
-                "pf": prices.get((pid, "Foil")),
-            })
+            card = {"id": pid, "c": p["_number"], "k": keys, "n": p["name"], "g": p["groupId"], "r": p["_rarity"]}
+            # Por terminación: p = precio de mercado (ventas recientes), l = más bajo publicado
+            # (null = sin stock). Si TCGplayer no tiene esa terminación, no se incluyen las claves.
+            for sub, tag in (("Normal", "n"), ("Foil", "f")):
+                row = rows.get((pid, sub))
+                if row:
+                    card["p" + tag] = row.get("marketPrice")
+                    card["l" + tag] = row.get("lowPrice")
+            cards.append(card)
 
     data = {
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),

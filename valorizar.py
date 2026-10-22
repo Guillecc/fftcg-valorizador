@@ -27,6 +27,11 @@ UA = {"User-Agent": "FFTCG-Valorizador/1.0"}
 
 CODE_RE = re.compile(r"^([A-Z0-9]+)-0*(\d+)([A-Z]?)$")
 
+# Errores conocidos en el número de colección que publica TCGplayer (productId -> código correcto)
+CORRECTIONS = {
+    539819: "PR-158",  # Snow & Lightning (Full Art) figura como PR-156
+}
+
 
 @dataclass
 class Row:
@@ -98,7 +103,7 @@ def build_index(catalog: dict) -> tuple[dict, dict]:
     index: dict[tuple[str, int], list[dict]] = {}
     for p in catalog["products"]:
         ext = {e["name"]: e["value"] for e in p.get("extendedData", [])}
-        number = ext.get("Number")
+        number = CORRECTIONS.get(p["productId"], ext.get("Number"))
         if not number:
             continue  # productos sellados (boosters, cajas)
         p["_number"], p["_rarity"] = number, ext.get("Rarity", "")
