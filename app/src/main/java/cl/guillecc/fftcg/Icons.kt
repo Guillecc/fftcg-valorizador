@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 object AppIcons {
     val Search: ImageVector by lazy { icon("M10.5,4a6.5,6.5 0 1,0 0,13a6.5,6.5 0 1,0 0,-13z M15.5,15.5L20,20") }
     val Close: ImageVector by lazy { icon("M6,6L18,18M18,6L6,18") }
+    val Tune: ImageVector by lazy { icon("M4,7L20,7M7,12L17,12M10,17L14,17") }
     val Bolt: ImageVector by lazy { icon("M13,2L4,14h7l-1,8l9,-12h-7z", filled = true) }
     val MoreVert: ImageVector by lazy {
         icon(

@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -282,6 +283,7 @@ fun AppScreen() {
 
 // ------------------------------------------------------------------ Colección
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CollectionScreen(
     entries: List<Entry>,
@@ -296,12 +298,18 @@ fun CollectionScreen(
 ) {
     val ctx = LocalContext.current
     val installed = remember { Updater.installedVersion(ctx) }
-    val rows = remember(entries.toList(), version) {
-        entries.map { it to CardIndex.byId(it.id) }
-            .sortedByDescending { (e, c) -> e.unit(c)?.times(e.qty) ?: -1.0 }
-    }
-    val totalUsd = rows.sumOf { (e, c) -> (e.unit(c) ?: 0.0) * e.qty }
-    val missing = rows.count { (e, c) -> e.unit(c) == null }
+    val prefs = remember { ctx.getSharedPreferences("ui", Context.MODE_PRIVATE) }
+    var sort by remember { mutableStateOf(SortBy.of(prefs.getString("sort", null))) }
+    var grouped by remember { mutableStateOf(prefs.getBoolean("group", false)) }
+    var filters by remember { mutableStateOf(ColFilter()) }
+    var sheet by remember { mutableStateOf(false) }
+    // Toda la colección (los totales de arriba siempre la usan) y lo que se muestra según filtro y orden
+    val all = remember(entries.toList(), version) { entries.map { it to CardIndex.byId(it.id) } }
+    val rows = remember(all, sort, filters) { sortLines(all.filter { (e, c) -> filters.matches(e, c) }, sort) }
+    val groups = remember(rows, all, grouped) { if (grouped) groupBySet(rows, all) else emptyList() }
+    val totalUsd = all.sumOf { (e, c) -> (e.unit(c) ?: 0.0) * e.qty }
+    val missing = all.count { (e, c) -> e.unit(c) == null }
+    val weekChange = remember(all) { collectionChange(all, 7) }
     // Se guarda la clave (id, foil) para que el diálogo siempre muestre la versión actual de la línea
     var detail by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     var editFx by remember { mutableStateOf(false) }
@@ -400,6 +408,10 @@ fun CollectionScreen(
                     Column(Modifier.padding(horizontal = 16.dp)) {
                         Text(usd(totalUsd), fontSize = 30.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         Text(clp(totalUsd * fx), fontSize = 20.sp, color = GOLD)
+                        weekChange?.let {
+                            Spacer(Modifier.height(4.dp))
+                            ValueChangeText(it, CardIndex.histD7)
+                        }
                         Spacer(Modifier.height(6.dp))
                         Text(
                             "${entries.sumOf { it.qty }} cartas · ${if (missing > 0) "$missing sin precio · " else ""}" +
@@ -417,26 +429,54 @@ fun CollectionScreen(
                 }
             }
         }
-        if (rows.isEmpty()) item {
-            Text(
-                "Tu colección está vacía. Agrega cartas desde Buscar o Escanear, o importa un CSV (codigo,cantidad,foil).",
-                Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (all.isEmpty()) {
+            item(key = "empty") {
+                Text(
+                    "Tu colección está vacía. Agrega cartas desde Buscar o Escanear, o importa un CSV (codigo,cantidad,foil).",
+                    Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            item(key = "toolbar") {
+                val summary = if (!filters.active) null else {
+                    val shown = rows.sumOf { (e, c) -> (e.unit(c) ?: 0.0) * e.qty }
+                    "Filtrado: ${rows.sumOf { it.first.qty }} de ${all.sumOf { it.first.qty }} cartas · ${usd(shown)}"
+                }
+                CollectionToolbar(activeFilters = filters.count, summary = summary, onOpen = { sheet = true })
+            }
+            if (rows.isEmpty()) item(key = "nomatch") {
+                Text("Ninguna carta coincide con los filtros", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
-        itemsIndexed(rows, key = { _, (e, _) -> "${e.id}-${e.foil}" }) { i, (e, c) ->
-            val unit = e.unit(c)
-            CardRow(
-                card = c,
-                title = (if (unit != null && i < 10) "#${i + 1} " else "") + (c?.name ?: "Carta ${e.id}"),
-                subtitle = "${c?.code.orEmpty()} · ${c?.set.orEmpty()}",
-                foil = e.foil,
-                right = usd(unit?.times(e.qty)),
-                rightSub = "×${e.qty} · ${usd(unit)}",
-                rightNote = if (e.manual != null) "manual" else null,
-                warning = c != null && c.finish(e.foil) != null && !c.inStock(e.foil),
-                onClick = { detail = e.id to e.foil },
-            )
+        if (grouped) {
+            // Cada línea está en un solo set: las claves siguen siendo únicas entre secciones
+            groups.forEach { g ->
+                stickyHeader(key = "set-${g.groupId}") { SetHeader(g) }
+                items(g.lines, key = { (e, _) -> "${e.id}-${e.foil}" }) { (e, c) ->
+                    EntryRow(e, c, rank = null, onClick = { detail = e.id to e.foil })
+                }
+            }
+        } else {
+            itemsIndexed(rows, key = { _, (e, _) -> "${e.id}-${e.foil}" }) { i, (e, c) ->
+                // El ranking #1–#10 solo tiene sentido ordenando por valor total
+                EntryRow(e, c, rank = if (sort == SortBy.TOTAL) i else null, onClick = { detail = e.id to e.foil })
+            }
         }
+    }
+
+    if (sheet) {
+        SortFilterSheet(
+            sort = sort,
+            grouped = grouped,
+            filter = filters,
+            rarities = all.mapNotNull { it.second?.rarity?.takeIf { r -> r.isNotEmpty() } }.distinct().sorted(),
+            sets = all.mapNotNull { it.second }.filter { it.set.isNotEmpty() }
+                .distinctBy { it.groupId }.map { it.groupId to it.set }.sortedBy { it.second.lowercase() },
+            onSort = { sort = it; prefs.edit().putString("sort", it.key).apply() },
+            onGrouped = { grouped = it; prefs.edit().putBoolean("group", it).apply() },
+            onFilter = { filters = it },
+            onDismiss = { sheet = false },
+        )
     }
 
     val opened = detail?.let { (id, foil) -> entries.firstOrNull { it.id == id && it.foil == foil } }
@@ -504,6 +544,24 @@ fun CollectionScreen(
             },
         )
     }
+}
+
+/** Fila de una línea de la colección; [rank] (índice en la lista) muestra "#1"–"#10" a las de más valor. */
+@Composable
+private fun EntryRow(e: Entry, c: CardInfo?, rank: Int?, onClick: () -> Unit) {
+    val unit = e.unit(c)
+    CardRow(
+        card = c,
+        title = (if (unit != null && rank != null && rank < 10) "#${rank + 1} " else "") + (c?.name ?: "Carta ${e.id}"),
+        subtitle = "${c?.code.orEmpty()} · ${c?.set.orEmpty()}",
+        foil = e.foil,
+        right = usd(unit?.times(e.qty)),
+        rightSub = "×${e.qty} · ${usd(unit)}",
+        rightNote = if (e.manual != null) "manual" else null,
+        warning = c != null && c.finish(e.foil) != null && !c.inStock(e.foil),
+        trend = entryChange(e, c, 7),
+        onClick = onClick,
+    )
 }
 
 private const val MAX_CSV_BYTES = 1L shl 20
@@ -793,6 +851,7 @@ fun CardRow(
     rightNote: String? = null,
     warning: Boolean = false,
     note: String? = null,
+    trend: Double? = null, // cambio de precio a 7 días (0.12 = +12 %)
 ) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -819,6 +878,10 @@ fun CardRow(
                 }
                 if (rightSub.isNotEmpty()) Text(rightSub, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 if (rightNote != null) Text(rightNote, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                val trendText = trendLabel(trend)
+                if (trendText != null && trend != null) {
+                    Text(trendText, fontSize = 12.sp, color = if (trend > 0) TrendUp else TrendDown, maxLines = 1)
+                }
             }
         }
     }
@@ -929,6 +992,7 @@ fun AddDialog(card: CardInfo, fx: Double, onDismiss: () -> Unit, onAdd: (Boolean
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Normal ${usd(card.price(false))} · Foil ${usd(card.price(true))}", fontSize = 13.sp)
                     PriceNotes(card, foil)
+                    PastPrices(card, foil)
                     if (card.price(foil) == null) {
                         Text(
                             "Esta versión no tiene precio en ${if (foil) "foil" else "normal"} en TCGplayer",
@@ -986,7 +1050,10 @@ fun EntryDialog(
                         Text("Mercado TCGplayer: ${usd(market)} c/u", fontSize = 12.sp, color = muted)
                     } else {
                         Text("Precio de mercado: ${usd(market)} c/u", fontSize = 13.sp)
-                        if (card != null) PriceNotes(card, entry.foil)
+                        if (card != null) {
+                            PriceNotes(card, entry.foil)
+                            PastPrices(card, entry.foil)
+                        }
                     }
                     unit?.let { Text("Total: ${usd(it * entry.qty)} · ${clp(it * entry.qty * fx)}", fontSize = 13.sp, color = GOLD) }
                 }

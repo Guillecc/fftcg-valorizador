@@ -23,13 +23,14 @@ data class CardInfo(
     val rarity: String,
     val normal: Finish?, // null = TCGplayer no tiene esa terminación
     val foil: Finish?,
-    // Datos opcionales del índice (aún no se muestran): elemento, tipo y precio de mercado hace 7 y 30 días
+    // Datos opcionales del índice: elemento, tipo y precio de mercado hace 7 y 30 días
     val element: String? = null,
     val type: String? = null,
     val normal7: Double? = null,
     val foil7: Double? = null,
     val normal30: Double? = null,
     val foil30: Double? = null,
+    val groupId: Int = 0, // set de TCGplayer ("g" del índice)
 ) {
     /** Página de TCGplayer: ahí se ven las "Latest Sales". */
     val url get() = "https://www.tcgplayer.com/product/$id"
@@ -42,12 +43,31 @@ data class CardInfo(
     fun price(foil: Boolean): Double? = finish(foil)?.let { it.market ?: it.low }
     fun inStock(foil: Boolean): Boolean = finish(foil)?.low != null
 
+    /** Precio de mercado hace 7 o 30 días (null si aún no hay historial). */
+    fun past(foil: Boolean, days: Int): Double? = when (days) {
+        7 -> if (foil) foil7 else normal7
+        30 -> if (foil) foil30 else normal30
+        else -> null
+    }
+
     /** Búsqueda de vendidos en eBay. */
     fun ebayUrl(foil: Boolean): String {
         var q = "FFTCG ${code.substringBefore('/')} $name"
         if (foil && !name.contains("Full Art", ignoreCase = true)) q += " foil"
         return "https://www.ebay.com/sch/i.html?_nkw=${URLEncoder.encode(q, "UTF-8")}&LH_Sold=1&LH_Complete=1"
     }
+}
+
+/** Código sin la segunda numeración ("1-001H/2-001H" -> "1-001H"). */
+fun baseCode(code: String): String = code.substringBefore('/').trim()
+
+/** Cambio del precio de mercado vs hace [days] días: (hoy − antes) / antes; null si falta alguno. */
+fun change(card: CardInfo?, foil: Boolean, days: Int): Double? {
+    if (card == null) return null
+    val now = card.finish(foil)?.market ?: return null
+    val past = card.past(foil, days) ?: return null
+    if (past <= 0) return null
+    return (now - past) / past
 }
 
 /**
@@ -71,6 +91,9 @@ object CardIndex {
         val base: Map<Int, String>, // nombre base normalizado por productId
         val named: List<Pair<String, CardInfo>>, // " nombre base " (≥ 4 letras) para buscarlo dentro de un texto
         val prefixes: Set<String>, // prefijos de código conocidos ("1", "PR", "RE"…)
+        val histD7: String?, // fecha real de los precios "hace 7 días"
+        val histD30: String?,
+        val setSizes: Map<Int, Int>, // códigos base distintos por set (groupId)
     )
 
     @Volatile private var index: Index? = null
@@ -81,6 +104,11 @@ object CardIndex {
 
     val ready get() = index != null
     val updated get() = index?.updated
+    val histD7 get() = index?.histD7
+    val histD30 get() = index?.histD30
+
+    /** Cantidad de códigos distintos del set (para la completitud); 0 si no se conoce. */
+    fun setSize(groupId: Int): Int = index?.setSizes?.get(groupId) ?: 0
 
     private fun file(ctx: Context) = File(ctx.filesDir, "index.json.gz")
 
@@ -268,11 +296,13 @@ object CardIndex {
                 foil7 = f7,
                 normal30 = n30,
                 foil30 = f30,
+                groupId = c.optInt("g"),
             )
         }
         val byKey = HashMap<String, MutableList<CardInfo>>()
         for (c in cards) for (k in c.keys) byKey.getOrPut(k) { mutableListOf() }.add(c)
         val base = cards.associate { it.id to baseName(it.name) }
+        val hist = root.optJSONObject("hist")
         return Index(
             updated = root.optString("updated"),
             byId = cards.associateBy { it.id },
@@ -281,6 +311,10 @@ object CardIndex {
             base = base,
             named = cards.mapNotNull { c -> base[c.id]?.takeIf { it.length >= 4 }?.let { " $it " to c } },
             prefixes = byKey.keys.map { it.substringBefore('-') }.toSet(),
+            histD7 = hist?.optString("d7")?.trim()?.takeIf { it.isNotEmpty() },
+            histD30 = hist?.optString("d30")?.trim()?.takeIf { it.isNotEmpty() },
+            setSizes = cards.groupBy { it.groupId }
+                .mapValues { (_, cs) -> cs.map { baseCode(it.code) }.filter { it.isNotEmpty() }.toSet().size },
         )
     }
 }
