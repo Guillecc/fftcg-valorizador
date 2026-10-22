@@ -50,12 +50,18 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 
+/** Un código leído: [key] = "PR-158", [known] = existe en el índice, [text] = todo el texto OCR de ese cuadro. */
+data class ScanHit(val key: String, val known: Boolean, val text: String)
+
 /**
  * Lee el código impreso abajo a la derecha de la carta ("1-001H", "PR-029", "Re-001H/12-002H").
- * Corrige confusiones típicas del OCR y solo acepta códigos que existen en el índice,
- * vistos en dos cuadros seguidos.
+ * Corrige confusiones típicas del OCR. Un código del índice se acepta tras dos cuadros seguidos;
+ * uno con forma válida que no está en el índice, tras tres (más estricto para no reportar ruido).
  */
-class CodeReader(private val exists: (String) -> Boolean) {
+class CodeReader(
+    private val exists: (String) -> Boolean,
+    private val plausiblePrefix: (String) -> Boolean,
+) {
     private val token = Regex("([A-Z0-9]{1,3})\\s?[-–—]+\\s?([0-9OIDLSBZ]{3})")
     private val digits = mapOf('O' to '0', 'D' to '0', 'I' to '1', 'L' to '1', 'S' to '5', 'B' to '8', 'Z' to '2')
     private var last: String? = null
@@ -65,31 +71,38 @@ class CodeReader(private val exists: (String) -> Boolean) {
 
     private fun fix(s: String) = s.map { digits[it] ?: it }.joinToString("")
 
-    fun codes(text: String): List<String> =
-        token.findAll(text.uppercase()).flatMap { m ->
-            val prefix = m.groupValues[1]
+    /** Claves leídas en el texto (true = está en el índice); primero las conocidas. */
+    fun codes(text: String): List<Pair<String, Boolean>> {
+        val known = mutableListOf<String>()
+        val unknown = mutableListOf<String>()
+        for (m in token.findAll(text.uppercase())) {
+            val prefixes = listOf(m.groupValues[1], fix(m.groupValues[1])).distinct()
             val number = fix(m.groupValues[2]).toInt()
-            listOf(prefix, fix(prefix)).distinct().map { "$it-$number" }
-        }.filter(exists).distinct().toList()
+            val key = prefixes.map { "$it-$number" }.firstOrNull(exists)
+            if (key != null) known += key
+            else prefixes.firstOrNull(plausiblePrefix)?.let { unknown += "$it-$number" }
+        }
+        return known.distinct().map { it to true } + unknown.distinct().map { it to false }
+    }
 
-    /** Devuelve una clave confirmada, o null. */
-    fun accept(text: String): String? {
-        val key = codes(text).firstOrNull() ?: return null
+    /** Devuelve un código confirmado, o null. */
+    fun accept(text: String): ScanHit? {
+        val (key, known) = codes(text).firstOrNull() ?: return null
         if (key == last) hits++ else { last = key; hits = 1 }
-        if (hits < 2) return null
+        if (hits < if (known) 2 else 3) return null
         hits = 0
         // La misma carta sigue frente a la cámara tras agregarla: no repetir por unos segundos
         val now = System.currentTimeMillis()
         if (key == lastReported && now - reportedAt < 4000) return null
         lastReported = key
         reportedAt = now
-        return key
+        return ScanHit(key, known, text)
     }
 }
 
 @OptIn(ExperimentalGetImage::class)
 @Composable
-fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier = Modifier) {
+fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     val owner = LocalLifecycleOwner.current
     val currentOnCode by rememberUpdatedState(onCode)
@@ -101,7 +114,7 @@ fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier 
     DisposableEffect(owner) {
         val executor = Executors.newSingleThreadExecutor()
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val reader = CodeReader(CardIndex::exists)
+        val reader = CodeReader(CardIndex::exists, CardIndex::plausiblePrefix)
         val providerFuture = ProcessCameraProvider.getInstance(ctx)
         providerFuture.addListener({
             val provider = providerFuture.get()
@@ -125,8 +138,8 @@ fun CameraScanner(paused: Boolean, onCode: (String) -> Unit, modifier: Modifier 
                 recognizer.process(InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees))
                     .addOnSuccessListener { text ->
                         // Corre en el hilo principal
-                        val key = reader.accept(text.text)
-                        if (key != null && !currentPaused) currentOnCode(key)
+                        val hit = reader.accept(text.text)
+                        if (hit != null && !currentPaused) currentOnCode(hit)
                     }
                     .addOnCompleteListener { proxy.close() }
             }

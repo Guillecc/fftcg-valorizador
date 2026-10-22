@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -68,6 +69,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -336,54 +339,65 @@ fun SearchScreen(onPick: (CardInfo) -> Unit) {
     var q by rememberSaveable { mutableStateOf("") }
     val results = remember(q) { CardIndex.search(q) }
     Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
-        val muted = MaterialTheme.colorScheme.onSurfaceVariant
-        OutlinedTextField(
-            value = q, onValueChange = { q = it },
-            placeholder = { Text("Código (1-001H) o nombre", maxLines = 1) },
-            leadingIcon = { Icon(AppIcons.Search, contentDescription = null, tint = muted, modifier = Modifier.size(20.dp)) },
-            trailingIcon = if (q.isEmpty()) null else {
-                {
-                    IconButton(onClick = { q = "" }) {
-                        Icon(AppIcons.Close, contentDescription = "Borrar", tint = muted, modifier = Modifier.size(18.dp))
-                    }
-                }
-            },
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                focusedBorderColor = Color.Transparent,
-                unfocusedBorderColor = Color.Transparent,
-            ),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        )
+        SearchField(q, { q = it }, Modifier.fillMaxWidth().padding(vertical = 8.dp))
         if (q.isNotBlank() && results.isEmpty()) Text("Sin resultados", color = MaterialTheme.colorScheme.onSurfaceVariant)
         CardList(results, onPick)
     }
 }
 
+/** Campo de búsqueda: lupa, botón para borrar, esquinas de 12dp y sin borde. */
+@Composable
+fun SearchField(q: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    OutlinedTextField(
+        value = q, onValueChange = onChange,
+        placeholder = { Text("Código (1-001H) o nombre", maxLines = 1) },
+        leadingIcon = { Icon(AppIcons.Search, contentDescription = null, tint = muted, modifier = Modifier.size(20.dp)) },
+        trailingIcon = if (q.isEmpty()) null else {
+            {
+                IconButton(onClick = { onChange("") }) {
+                    Icon(AppIcons.Close, contentDescription = "Borrar", tint = muted, modifier = Modifier.size(18.dp))
+                }
+            }
+        },
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            focusedBorderColor = Color.Transparent,
+            unfocusedBorderColor = Color.Transparent,
+        ),
+        modifier = modifier,
+    )
+}
+
 @Composable
 fun CardList(cards: List<CardInfo>, onPick: (CardInfo) -> Unit) {
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-        items(cards, key = { it.id }) { c ->
-            // Precio principal: el normal; si solo hay foil, el foil con su etiqueta
-            val normal = c.price(false)
-            val foil = c.price(true)
-            val shownFoil = normal == null && (foil != null || c.defaultFoil)
-            CardRow(
-                card = c,
-                title = c.name,
-                subtitle = "${c.code} · ${c.set}",
-                foil = false,
-                right = (normal ?: foil)?.let { usd(it) } ?: "Sin precio",
-                rightTag = if (normal == null && foil != null) "Foil" else null,
-                rightSub = if (normal != null && foil != null) "Foil ${usd(foil)}" else "",
-                warning = c.finish(shownFoil) != null && !c.inStock(shownFoil),
-                onClick = { onPick(c) },
-            )
-        }
+        items(cards, key = { it.id }) { c -> CardItem(c) { onPick(c) } }
     }
+}
+
+/** Fila de resultado de búsqueda/escaneo; [note] es una línea apagada opcional (ej: "Coincide por nombre"). */
+@Composable
+fun CardItem(c: CardInfo, note: String? = null, onClick: () -> Unit) {
+    // Precio principal: el normal; si solo hay foil, el foil con su etiqueta
+    val normal = c.price(false)
+    val foil = c.price(true)
+    val shownFoil = normal == null && (foil != null || c.defaultFoil)
+    CardRow(
+        card = c,
+        title = c.name,
+        subtitle = "${c.code} · ${c.set}",
+        foil = false,
+        right = (normal ?: foil)?.let { usd(it) } ?: "Sin precio",
+        rightTag = if (normal == null && foil != null) "Foil" else null,
+        rightSub = if (normal != null && foil != null) "Foil ${usd(foil)}" else "",
+        warning = c.finish(shownFoil) != null && !c.inStock(shownFoil),
+        note = note,
+        onClick = onClick,
+    )
 }
 
 // ------------------------------------------------------------------ Escanear
@@ -406,32 +420,105 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
         return
     }
 
-    var found by remember { mutableStateOf<List<CardInfo>>(emptyList()) }
+    var hit by remember { mutableStateOf<ScanHit?>(null) }
+    var searching by remember { mutableStateOf(false) } // el usuario pidió buscar a mano ("¿No está? Buscar")
+    var q by remember { mutableStateOf("") }
+    val h = hit
+    val result = remember(h) { h?.let { scanResult(it) } }
+    val results = remember(q) { CardIndex.search(q) }
+    // Código fuera del índice (o sin cartas): se ofrece buscar de inmediato
+    val unknown = h != null && (!h.known || result?.byCode.isNullOrEmpty())
+    val showSearch = searching || unknown
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(searching) { if (searching) runCatching { focus.requestFocus() } }
+
+    fun reset() {
+        hit = null
+        searching = false
+        q = ""
+    }
+
     Column(Modifier.fillMaxSize()) {
         CameraScanner(
-            paused = found.isNotEmpty(),
-            onCode = { key -> found = CardIndex.lookup(key) },
-            modifier = Modifier.fillMaxWidth().weight(1.5f),
+            paused = h != null,
+            onCode = { hit = it; searching = false; q = "" },
+            // Al buscar, la cámara (pausada) cede espacio a los resultados
+            modifier = Modifier.fillMaxWidth().weight(if (showSearch) 0.5f else 1.5f),
         )
-        Column(Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)) {
-            if (found.isEmpty()) {
+        Column(Modifier.fillMaxWidth().weight(1f).imePadding().padding(horizontal = 12.dp)) {
+            val muted = MaterialTheme.colorScheme.onSurfaceVariant
+            if (h == null || result == null) {
                 Text(
                     "Encuadra la carta en el marco, con el código (ej: 1-001H) dentro de la zona punteada. " +
                         "Si no lo lee, acerca la cámara al código.",
-                    Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    Modifier.padding(vertical = 12.dp), color = muted,
                 )
             } else {
+                val code = result.byCode.firstOrNull { h.key in it.keys }?.code?.substringBefore('/') ?: h.key
+                val n = result.byCode.size
                 Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "${found.first().code.substringBefore('/')} · ${found.size} ${if (found.size == 1) "versión" else "versiones"}",
+                        if (unknown) "${h.key} no está en TCGplayer" else "$code · $n ${if (n == 1) "versión" else "versiones"}",
                         Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
-                    TextButton(onClick = { found = emptyList() }) { Text("Escanear otra", maxLines = 1, softWrap = false) }
+                    TextButton(onClick = { reset() }) { Text("Escanear otra", maxLines = 1, softWrap = false) }
                 }
-                CardList(found) { onPick(it) { found = emptyList() } }
+                if (showSearch) SearchField(q, { q = it }, Modifier.fillMaxWidth().padding(bottom = 8.dp).focusRequester(focus))
+                // Al agregar una carta que no trae este código (o elegida por nombre/búsqueda), se recuerda la asociación
+                val pick: (CardInfo, Boolean) -> Unit = { c, learn ->
+                    onPick(c) {
+                        if (learn || h.key !in c.keys) CardIndex.remember(ctx, h.key, c.id)
+                        reset()
+                    }
+                }
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
+                    if (q.isBlank()) {
+                        if (unknown) item(key = "hint") {
+                            Text(
+                                if (result.byName.isEmpty()) "Búscala por nombre; la próxima vez se reconocerá sola."
+                                else "Elige la carta o búscala; la próxima vez se reconocerá sola.",
+                                fontSize = 13.sp, color = muted,
+                            )
+                        }
+                        // Si el nombre leído no calza con ninguna carta de este código, el código puede estar mal
+                        // publicado: las coincidencias por nombre van primero
+                        val nameFirst = !result.codeMatchesName && result.byName.isNotEmpty()
+                        if (nameFirst) items(result.byName, key = { "n${it.id}" }) { c -> CardItem(c, note = "Coincide por nombre") { pick(c, true) } }
+                        items(result.byCode, key = { "c${it.id}" }) { c -> CardItem(c) { pick(c, false) } }
+                        if (!nameFirst) items(result.byName, key = { "n${it.id}" }) { c -> CardItem(c, note = "Coincide por nombre") { pick(c, true) } }
+                        if (!showSearch) item(key = "buscar") {
+                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                TextButton(onClick = { searching = true }) { Text("¿No está? Buscar", maxLines = 1, softWrap = false) }
+                            }
+                        }
+                    } else {
+                        if (results.isEmpty()) item(key = "vacio") { Text("Sin resultados", color = muted) }
+                        items(results, key = { "s${it.id}" }) { c -> CardItem(c) { pick(c, true) } }
+                    }
+                }
             }
         }
     }
+}
+
+/** Candidatos de un escaneo: por código y, aparte, cartas cuyo nombre se leyó en la carta. */
+private class ScanResult(val byCode: List<CardInfo>, val byName: List<CardInfo>, val codeMatchesName: Boolean)
+
+private fun scanResult(hit: ScanHit): ScanResult {
+    val pinned = CardIndex.overrideFor(hit.key)
+    // La asociada por el usuario primero; luego las versiones cuyo nombre aparece en el texto leído
+    val byCode = CardIndex.lookup(hit.key).distinctBy { it.id }.sortedBy {
+        when {
+            it.id == pinned -> 0
+            CardIndex.nameInText(it, hit.text) -> 1
+            else -> 2
+        }
+    }
+    val byName = CardIndex.byNameInText(
+        hit.text, limit = 5, prefix = hit.key.substringBefore('-'), exclude = byCode.map { it.id }.toSet(),
+    )
+    val codeMatchesName = byCode.any { it.id == pinned || CardIndex.nameInText(it, hit.text) }
+    return ScanResult(byCode, byName, codeMatchesName)
 }
 
 // ------------------------------------------------------------------ Componentes
@@ -447,6 +534,7 @@ fun CardRow(
     onClick: () -> Unit,
     rightTag: String? = null,
     warning: Boolean = false,
+    note: String? = null,
 ) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -460,6 +548,7 @@ fun CardRow(
                 Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (foil) Text("✦ Foil", fontSize = 12.sp, color = GOLD)
                 if (warning) Text(NO_STOCK, fontSize = 12.sp, color = AMBER, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (note != null) Text(note, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.width(8.dp))
             Column(horizontalAlignment = Alignment.End) {

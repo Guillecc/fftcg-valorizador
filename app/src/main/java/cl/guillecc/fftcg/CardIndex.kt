@@ -57,9 +57,16 @@ object CardIndex {
         val byId: Map<Int, CardInfo>,
         val byKey: Map<String, List<CardInfo>>,
         val searchable: List<Pair<String, CardInfo>>,
+        val base: Map<Int, String>, // nombre base normalizado por productId
+        val named: List<Pair<String, CardInfo>>, // " nombre base " (≥ 4 letras) para buscarlo dentro de un texto
+        val prefixes: Set<String>, // prefijos de código conocidos ("1", "PR", "RE"…)
     )
 
     @Volatile private var index: Index? = null
+
+    /** Correcciones aprendidas al escanear: clave escaneada ("PR-158") -> productId elegido por el usuario. */
+    @Volatile private var overrides: Map<String, Int> = emptyMap()
+    private const val OVERRIDES = "overrides"
 
     val ready get() = index != null
     val updated get() = index?.updated
@@ -70,7 +77,19 @@ object CardIndex {
     fun load(ctx: Context) {
         val f = file(ctx)
         if (f.exists()) index = runCatching { parse(f) }.getOrNull()
+        overrides = ctx.getSharedPreferences(OVERRIDES, Context.MODE_PRIVATE).all
+            .mapNotNull { (k, v) -> (v as? Int)?.let { k to it } }.toMap()
     }
+
+    /** Recuerda que [key] corresponde a la carta [id] (la eligió el usuario tras escanear). */
+    fun remember(ctx: Context, key: String, id: Int) {
+        val k = codeKey(key) ?: return
+        overrides = overrides + (k to id)
+        ctx.getSharedPreferences(OVERRIDES, Context.MODE_PRIVATE).edit().putInt(k, id).apply()
+    }
+
+    /** productId que el usuario asoció a esta clave, si la carta sigue en el índice. */
+    fun overrideFor(key: String): Int? = overrides[key]?.takeIf { byId(it) != null }
 
     /** Descarga el índice si falta o tiene más de 12 h. */
     fun refreshIfStale(ctx: Context, force: Boolean = false) {
@@ -95,21 +114,57 @@ object CardIndex {
         return "${m.groupValues[1]}-${m.groupValues[2].toInt()}"
     }
 
-    fun exists(key: String) = index?.byKey?.containsKey(key) == true
+    fun exists(key: String) = index?.byKey?.containsKey(key) == true || overrideFor(key) != null
+
+    /** Prefijo con forma de código FFTCG: 1–2 dígitos, PR/RE/A/B/C/Wnn o uno que ya existe en el índice. */
+    fun plausiblePrefix(prefix: String) =
+        PREFIX.matches(prefix) || index?.prefixes?.contains(prefix) == true
 
     fun byId(id: Int): CardInfo? = index?.byId?.get(id)
 
-    /** Versiones de un código: primero las del set que indica el código, y la base (nombre más corto) antes. */
+    /**
+     * Versiones de un código: primero la que el usuario asoció al escanear (si hay), luego las del set
+     * que indica el código, y la base (nombre más corto) antes.
+     */
     fun lookup(code: String): List<CardInfo> {
         val key = codeKey(code) ?: return emptyList()
         val prefix = key.substringBefore('-')
-        return index?.byKey?.get(key).orEmpty().sortedWith(
+        val list = index?.byKey?.get(key).orEmpty().sortedWith(
             compareBy<CardInfo>(
                 { if (it.setAbbr.uppercase() in listOf(prefix, "OP$prefix")) 0 else 1 },
                 { it.name.length },
                 { it.id },
             )
         )
+        val pinned = overrideFor(key)?.let { byId(it) } ?: return list
+        return listOf(pinned) + list.filter { it.id != pinned.id }
+    }
+
+    /** ¿Aparece el nombre base de la carta (sin versión ni sufijo de código) en el texto? */
+    fun nameInText(card: CardInfo, text: String): Boolean {
+        val n = index?.base?.get(card.id) ?: baseName(card.name)
+        return n.isNotEmpty() && " ${words(text)} ".contains(" $n ")
+    }
+
+    /**
+     * Cartas cuyo nombre base (≥ 4 letras) aparece completo en el texto (ej: lo leído por la cámara).
+     * Primero las del prefijo [prefix], luego los nombres más largos (más específicos).
+     */
+    fun byNameInText(text: String, limit: Int, prefix: String? = null, exclude: Set<Int> = emptySet()): List<CardInfo> {
+        val idx = index ?: return emptyList()
+        val t = " ${words(text)} "
+        if (t.isBlank()) return emptyList()
+        return idx.named.filter { it.second.id !in exclude && t.contains(it.first) }
+            .sortedWith(
+                compareBy<Pair<String, CardInfo>>(
+                    { p -> if (prefix != null && p.second.keys.any { it.substringBefore('-') == prefix }) 0 else 1 },
+                    { p -> -p.first.length },
+                    { p -> p.second.name.length },
+                    { p -> p.second.id },
+                )
+            )
+            .map { it.second }
+            .take(limit)
     }
 
     /** Busca por código ("1-001H") o por palabras del nombre, sin acentos ni mayúsculas. */
@@ -126,6 +181,16 @@ object CardIndex {
 
     private fun normalize(s: String) =
         Normalizer.normalize(s, Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase()
+
+    private val PREFIX = Regex("[1-9]\\d?|PR|RE|[ABC]|W\\d\\d")
+    private val NON_WORD = Regex("[^a-z0-9]+")
+    private val VERSION = Regex("\\s*[(\\[][^)\\]]*[)\\]]") // " (Full Art)", " [Foil]"
+    private val CODE_SUFFIX = Regex("\\s+-\\s+\\S*\\d.*$") // " - PR-157"
+
+    /** Minúsculas, sin acentos, solo letras y números separados por un espacio. */
+    private fun words(s: String) = normalize(s).split(NON_WORD).filter { it.isNotEmpty() }.joinToString(" ")
+
+    private fun baseName(name: String) = words(name.replace(VERSION, "").replace(CODE_SUFFIX, ""))
 
     /** "pn"/"ln" (o "pf"/"lf"): sin ninguna de las dos claves, la terminación no existe. */
     private fun finish(c: JSONObject, tag: String): Finish? {
@@ -160,11 +225,15 @@ object CardIndex {
         }
         val byKey = HashMap<String, MutableList<CardInfo>>()
         for (c in cards) for (k in c.keys) byKey.getOrPut(k) { mutableListOf() }.add(c)
+        val base = cards.associate { it.id to baseName(it.name) }
         return Index(
             updated = root.optString("updated"),
             byId = cards.associateBy { it.id },
             byKey = byKey,
             searchable = cards.map { normalize("${it.name} ${it.code} ${it.set}") to it },
+            base = base,
+            named = cards.mapNotNull { c -> base[c.id]?.takeIf { it.length >= 4 }?.let { " $it " to c } },
+            prefixes = byKey.keys.map { it.substringBefore('-') }.toSet(),
         )
     }
 }
