@@ -1,6 +1,7 @@
 package cl.guillecc.fftcg
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -22,6 +23,13 @@ data class CardInfo(
     val rarity: String,
     val normal: Finish?, // null = TCGplayer no tiene esa terminación
     val foil: Finish?,
+    // Datos opcionales del índice (aún no se muestran): elemento, tipo y precio de mercado hace 7 y 30 días
+    val element: String? = null,
+    val type: String? = null,
+    val normal7: Double? = null,
+    val foil7: Double? = null,
+    val normal30: Double? = null,
+    val foil30: Double? = null,
 ) {
     /** Página de TCGplayer: ahí se ven las "Latest Sales". */
     val url get() = "https://www.tcgplayer.com/product/$id"
@@ -50,6 +58,9 @@ object CardIndex {
     private const val INDEX_URL =
         "https://github.com/Guillecc/fftcg-valorizador/releases/download/index/index.json.gz"
     private const val MAX_AGE_MS = 12 * 60 * 60 * 1000L
+    private const val MAX_GZ = 5L shl 20 // descargado (hoy ~130 KB)
+    private const val MAX_JSON = 20L shl 20 // descomprimido (hoy ~650 KB)
+    private const val MAX_PRICE = 100_000.0
     private val CODE = Regex("^([A-Z0-9]+)-+0*(\\d{1,4})[A-Z]?$")
 
     private class Index(
@@ -96,16 +107,20 @@ object CardIndex {
         val f = file(ctx)
         if (!force && index != null && System.currentTimeMillis() - f.lastModified() < MAX_AGE_MS) return
         val tmp = File(ctx.filesDir, "index.json.gz.tmp")
-        val conn = Net.open(INDEX_URL)
         try {
-            if (conn.responseCode !in 200..299) throw IOException("HTTP ${conn.responseCode}")
-            conn.inputStream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            val conn = Net.open(INDEX_URL)
+            try {
+                if (conn.responseCode !in 200..299) throw IOException("HTTP ${conn.responseCode}")
+                conn.inputStream.use { input -> tmp.outputStream().use { Net.copyLimited(input, it, MAX_GZ) } }
+            } finally {
+                conn.disconnect()
+            }
+            val parsed = parse(tmp) // si viene corrupto, falla aquí y se conserva la copia anterior
+            if (!tmp.renameTo(f)) throw IOException("No se pudo guardar el índice")
+            index = parsed
         } finally {
-            conn.disconnect()
+            tmp.delete() // no hace nada si renameTo ya lo movió
         }
-        val parsed = parse(tmp) // si viene corrupto, falla aquí y se conserva la copia anterior
-        if (!tmp.renameTo(f)) throw IOException("No se pudo guardar el índice")
-        index = parsed
     }
 
     /** "29-087L" -> "29-87": sin ceros a la izquierda ni letra de rareza. */
@@ -192,35 +207,67 @@ object CardIndex {
 
     private fun baseName(name: String) = words(name.replace(VERSION, "").replace(CODE_SUFFIX, ""))
 
+    /** Precio creíble (finito, 0 < p ≤ 100.000) o null; un valor inválido no rompe el índice. */
+    private fun price(c: JSONObject, key: String): Double? =
+        c.optDouble(key, Double.NaN).takeIf { it.isFinite() && it > 0 && it <= MAX_PRICE }
+
+    private fun price(a: JSONArray, i: Int): Double? =
+        a.optDouble(i, Double.NaN).takeIf { it.isFinite() && it > 0 && it <= MAX_PRICE }
+
     /** "pn"/"ln" (o "pf"/"lf"): sin ninguna de las dos claves, la terminación no existe. */
     private fun finish(c: JSONObject, tag: String): Finish? {
         val p = "p$tag"
         val l = "l$tag"
         if (!c.has(p) && !c.has(l)) return null
-        return Finish(
-            market = if (c.isNull(p)) null else c.getDouble(p),
-            low = if (c.isNull(l)) null else c.getDouble(l),
-        )
+        return Finish(market = price(c, p), low = price(c, l))
+    }
+
+    /** Historial "h7"/"h30": [normal, foil] (o {"n":…, "f":…}); cualquier otra forma se ignora. */
+    private fun history(c: JSONObject, key: String): Pair<Double?, Double?> {
+        c.optJSONArray(key)?.let { return price(it, 0) to price(it, 1) }
+        c.optJSONObject(key)?.let { return price(it, "n") to price(it, "f") }
+        return null to null
+    }
+
+    /** Texto opcional ("e", "t"); si viene como lista (ej: ["Fire","Ice"]) se une con ";". */
+    private fun optText(c: JSONObject, key: String): String? {
+        val v = c.opt(key) ?: return null
+        val text = when (v) {
+            JSONObject.NULL -> return null
+            is JSONArray -> (0 until v.length()).mapNotNull { i -> v.optString(i).trim().takeIf { it.isNotEmpty() } }
+                .joinToString(";")
+            is JSONObject -> return null
+            else -> v.toString()
+        }
+        return text.trim().take(200).takeIf { it.isNotEmpty() }
     }
 
     private fun parse(f: File): Index {
-        val root = JSONObject(GZIPInputStream(f.inputStream()).bufferedReader().use { it.readText() })
+        val root = JSONObject(f.inputStream().use { raw -> GZIPInputStream(raw).use { Net.readLimited(it, MAX_JSON) } })
         val sets = root.getJSONObject("sets")
         val arr = root.getJSONArray("cards")
         val cards = (0 until arr.length()).map { i ->
             val c = arr.getJSONObject(i)
             val set = sets.optJSONArray(c.optInt("g").toString())
             val keys = c.getJSONArray("k")
+            val (n7, f7) = history(c, "h7")
+            val (n30, f30) = history(c, "h30")
             CardInfo(
                 id = c.getInt("id"),
                 code = c.optString("c"),
                 keys = (0 until keys.length()).map { keys.getString(it) },
-                name = c.optString("n"),
+                name = c.optString("n").trim(),
                 set = set?.optString(0).orEmpty(),
                 setAbbr = set?.optString(1).orEmpty(),
                 rarity = c.optString("r"),
                 normal = finish(c, "n"),
                 foil = finish(c, "f"),
+                element = optText(c, "e"),
+                type = optText(c, "t"),
+                normal7 = n7,
+                foil7 = f7,
+                normal30 = n30,
+                foil30 = f30,
             )
         }
         val byKey = HashMap<String, MutableList<CardInfo>>()

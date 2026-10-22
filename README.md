@@ -73,3 +73,15 @@ Requiere solo Python 3.10+. No hay que instalar nada más.
   carta y la correcta está al lado). Las correcciones manuales (`CORRECTIONS`) mandan.
 - El resultado queda en `auditoria.md`, en el release `index`, con los casos para revisar a mano. Si
   Materia Hunter no responde, el índice se publica igual, solo con las correcciones manuales.
+- Antes de publicar, `build_index.py` valida los datos: descarta precios que no sean números entre 0 y
+  100.000, recorta nombres a 200 caracteres y aborta (sin publicar, la app sigue con el índice anterior)
+  si salen menos de 4.000 o más de 20.000 cartas, o menos de 20 sets.
+- Historial de precios: cada día se guarda `AAAA-MM-DD.json.gz` (precio de mercado normal/foil por
+  producto) en el release `history`. El índice trae por carta `h7`/`h30` (precio de hace 7 y 30 días,
+  o el día más cercano dentro de ±3) y en `hist` las fechas usadas. El índice también trae el elemento
+  (`e`, varios separados por `;`) y el tipo (`t`). Si falta historial, el índice sale igual sin esos datos.
+- El APK se compila sin firmar y se firma en un job aparte (environment `release`), que verifica el
+  certificado. Cada release trae el SHA-256 y una attestation de procedencia
+  (`gh attestation verify FFTCG-Valor.apk -R Guillecc/fftcg-valorizador`).
+- El APK incluye solo la ABI `arm64-v8a` (teléfonos de 64 bits; no instala en equipos de 32 bits ni en
+  emuladores x86) y va minificado con R8.

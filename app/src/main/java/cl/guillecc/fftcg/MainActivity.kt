@@ -1,11 +1,13 @@
 package cl.guillecc.fftcg
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -53,6 +55,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -85,14 +88,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.text.NumberFormat
+import java.time.LocalDate
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -110,6 +117,12 @@ class MainActivity : ComponentActivity() {
 private val GOLD = Color(0xFFE8C46A)
 private val clpFormat: NumberFormat = NumberFormat.getIntegerInstance(Locale.forLanguageTag("es-CL"))
 
+/** Motivo legible de un error de red o de archivo. */
+fun errorReason(e: Throwable): String = when (e) {
+    is java.net.UnknownHostException, is java.net.ConnectException, is java.net.SocketTimeoutException -> "sin conexión a internet"
+    else -> e.message ?: "error desconocido"
+}
+
 fun usd(v: Double?) = if (v == null) "—" else String.format(Locale.US, "US$ %,.2f", v)
 fun clp(v: Double) = "$ " + clpFormat.format(Math.round(v))
 
@@ -122,6 +135,9 @@ fun AppScreen() {
     var indexVersion by remember { mutableIntStateOf(0) } // cambia al cargar/descargar el índice
     var loading by remember { mutableStateOf(true) }
     var fx by remember { mutableStateOf(Fx.current(ctx)) }
+    var fxSource by remember { mutableStateOf(Fx.source(ctx)) }
+    var refreshing by remember { mutableStateOf(false) } // descarga del índice en curso
+    var indexError by remember { mutableStateOf<String?>(null) } // motivo de la última descarga fallida
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var adding by remember { mutableStateOf<CardInfo?>(null) }
     var onAdded by remember { mutableStateOf<() -> Unit>({}) }
@@ -129,8 +145,9 @@ fun AppScreen() {
     var updating by remember { mutableStateOf<Update?>(null) } // diálogo de actualización abierto
 
     fun persist() {
-        val copy = entries.toList()
-        scope.launch(Dispatchers.IO) { Collection.save(ctx, copy) }
+        Collection.saveAsync(ctx, entries.toList()) { e ->
+            scope.launch { snack.showSnackbar("No se pudo guardar la colección (${e.message})") }
+        }
     }
 
     fun replace(list: List<Entry>) {
@@ -140,11 +157,21 @@ fun AppScreen() {
     }
 
     suspend fun refresh(force: Boolean) {
+        if (refreshing) return
+        refreshing = true
+        indexError = null
         val err = withContext(Dispatchers.IO) { runCatching { CardIndex.refreshIfStale(ctx, force) }.exceptionOrNull() }
+        refreshing = false
         indexVersion++
-        if (err != null) snack.showSnackbar("No se pudieron descargar los precios (${err.message})")
+        if (err != null) {
+            val reason = errorReason(err)
+            indexError = reason
+            // Sin índice, el error se muestra en pantalla con Reintentar; con índice, basta un aviso
+            if (CardIndex.ready) snack.showSnackbar("No se pudieron descargar los precios ($reason)")
+        }
         withContext(Dispatchers.IO) { runCatching { Fx.refreshIfStale(ctx) } }
         fx = Fx.current(ctx)
+        fxSource = Fx.source(ctx)
     }
 
     fun checkUpdate() {
@@ -163,13 +190,14 @@ fun AppScreen() {
 
     LaunchedEffect(Unit) {
         val saved = withContext(Dispatchers.IO) {
-            Updater.clean(ctx)
+            runCatching { Updater.clean(ctx) }
             CardIndex.load(ctx)
-            runCatching { Collection.load(ctx) }.getOrDefault(emptyList())
+            Collection.load(ctx)
         }
-        entries.addAll(saved)
+        entries.addAll(saved.entries)
         indexVersion++
         loading = false
+        saved.message?.let { msg -> scope.launch { snack.showSnackbar(msg, withDismissAction = true, duration = SnackbarDuration.Indefinite) } }
         refresh(force = false)
         // Una vez por inicio (GitHub permite 60 consultas por hora sin cuenta); si falla, no se avisa
         withContext(Dispatchers.IO) { runCatching { Updater.check(ctx) }.getOrNull() }?.let { available = it }
@@ -196,9 +224,19 @@ fun AppScreen() {
             when {
                 loading -> Text("Cargando…", Modifier.align(Alignment.Center))
                 !CardIndex.ready -> Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Descargando cartas y precios de TCGplayer…")
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = { scope.launch { refresh(force = true) } }) { Text("Reintentar", maxLines = 1) }
+                    val err = indexError
+                    if (refreshing || err == null) {
+                        Text("Descargando cartas y precios de TCGplayer…", textAlign = TextAlign.Center)
+                    } else {
+                        Text("No se pudieron descargar las cartas", fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Necesitas internet la primera vez. Motivo: $err",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        OutlinedButton(onClick = { scope.launch { refresh(force = true) } }) { Text("Reintentar", maxLines = 1) }
+                    }
                 }
                 tab == 0 -> Column(Modifier.fillMaxSize()) {
                     available?.let { u -> UpdateBanner(u, onClick = { updating = u }) }
@@ -207,8 +245,9 @@ fun AppScreen() {
                             entries = entries,
                             version = version,
                             fx = fx,
+                            fxSource = fxSource,
                             onChange = { replace(it) },
-                            onFxChange = { Fx.setManual(ctx, it); fx = Fx.current(ctx) },
+                            onFxChange = { Fx.setManual(ctx, it); fx = Fx.current(ctx); fxSource = Fx.source(ctx) },
                             onRefresh = { scope.launch { refresh(force = true); snack.showSnackbar("Precios al ${CardIndex.updated}") } },
                             onCheckUpdate = { checkUpdate() },
                             onMessage = { scope.launch { snack.showSnackbar(it) } },
@@ -248,6 +287,7 @@ fun CollectionScreen(
     entries: List<Entry>,
     version: Int,
     fx: Double,
+    fxSource: String,
     onChange: (List<Entry>) -> Unit,
     onFxChange: (Double?) -> Unit,
     onRefresh: () -> Unit,
@@ -266,20 +306,47 @@ fun CollectionScreen(
     var detail by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     var editFx by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var pendingImport by remember { mutableStateOf<CsvResult?>(null) } // CSV leído, esperando Agregar/Reemplazar
+    var backups by remember { mutableStateOf<List<Backup>?>(null) } // diálogo de respaldos abierto
+
+    fun importMessage(r: CsvResult): String {
+        val shown = r.failed.take(10).joinToString(", ")
+        val more = if (r.failed.size > 10) " y ${r.failed.size - 10} más" else ""
+        return "Importadas ${r.entries.size} líneas" + if (r.failed.isEmpty()) "" else ". Sin match: $shown$more"
+    }
+
+    fun applyImport(r: CsvResult, replaceAll: Boolean) {
+        val base = if (replaceAll) emptyList() else entries.toList()
+        onChange(r.entries.fold(base) { acc, e -> Collection.add(acc, e.id, e.foil, e.qty, e.manual) })
+        onMessage(importMessage(r))
+    }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching { ctx.contentResolver.openInputStream(uri)!!.bufferedReader().use { it.readText() } }.getOrNull()
-        if (text == null) { onMessage("No se pudo leer el archivo"); return@rememberLauncherForActivityResult }
-        val (ok, failed) = Collection.fromCsv(text)
-        onChange(ok.fold(entries.toList()) { acc, e -> Collection.add(acc, e.id, e.foil, e.qty, e.manual) })
-        onMessage("Importadas ${ok.size} líneas" + if (failed.isEmpty()) "" else ". Sin match: ${failed.joinToString(", ")}")
+        scope.launch {
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("sin acceso")
+                    Collection.fromCsv(input.use { Net.readLimited(it, MAX_CSV_BYTES) })
+                }
+            }
+            r.onFailure {
+                onMessage(if (it.message == "archivo demasiado grande") "El archivo es muy grande (máximo 1 MB)" else "No se pudo leer el archivo")
+            }.onSuccess { res ->
+                when {
+                    res.entries.isEmpty() -> onMessage(importMessage(res))
+                    entries.isEmpty() -> applyImport(res, replaceAll = false)
+                    else -> pendingImport = res
+                }
+            }
+        }
     }
 
     LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
                     // Encabezado: título y menú en la misma fila, centrados verticalmente
                     Row(
                         Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
@@ -303,6 +370,13 @@ fun CollectionScreen(
                                     text = { Text("Exportar CSV", maxLines = 1) },
                                     onClick = { menu = false; shareCsv(ctx, entries) },
                                     enabled = entries.isNotEmpty(),
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Restaurar respaldo", maxLines = 1) },
+                                    onClick = {
+                                        menu = false
+                                        scope.launch { backups = withContext(Dispatchers.IO) { Collection.backups(ctx) } }
+                                    },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Actualizar precios", maxLines = 1) },
@@ -332,11 +406,13 @@ fun CollectionScreen(
                                 "precios TCGplayer al ${CardIndex.updated}",
                             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Text(
-                            "1 USD = ${clp(fx)}${if (Fx.manual(ctx) != null) " (fijo)" else " (dólar observado)"} · cambiar",
-                            fontSize = 13.sp, color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable { editFx = true }.padding(vertical = 4.dp),
-                        )
+                        // Objetivo táctil de 48dp de alto para el enlace "cambiar"
+                        Box(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { editFx = true },
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            Text("1 USD = ${clp(fx)} ($fxSource) · cambiar", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
             }
@@ -383,6 +459,94 @@ fun CollectionScreen(
         )
     }
     if (editFx) FxDialog(current = fx, onDismiss = { editFx = false }, onSet = { onFxChange(it); editFx = false })
+
+    pendingImport?.let { r ->
+        AlertDialog(
+            onDismissRequest = { pendingImport = null },
+            title = { Text("Importar CSV") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("¿Agregar a tu colección o reemplazarla?")
+                    Text(
+                        "El archivo trae ${r.entries.size} líneas. Agregar suma copias; Reemplazar deja solo las del archivo.",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            // Tres opciones apiladas a todo el ancho: en una fila no caben sin apretarse
+            confirmButton = {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { pendingImport = null; applyImport(r, replaceAll = false) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Agregar", maxLines = 1)
+                    }
+                    OutlinedButton(onClick = { pendingImport = null; applyImport(r, replaceAll = true) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Reemplazar", maxLines = 1)
+                    }
+                    TextButton(onClick = { pendingImport = null }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Cancelar", maxLines = 1)
+                    }
+                }
+            },
+        )
+    }
+
+    backups?.let { list ->
+        RestoreDialog(
+            backups = list,
+            onDismiss = { backups = null },
+            onRestore = { b ->
+                backups = null
+                scope.launch {
+                    val r = withContext(Dispatchers.IO) { runCatching { Collection.readBackup(b.file) } }
+                    r.onSuccess { onChange(it); onMessage("Colección restaurada del ${dayMonth(b.date)}") }
+                        .onFailure { onMessage("No se pudo leer el respaldo") }
+                }
+            },
+        )
+    }
+}
+
+private const val MAX_CSV_BYTES = 1L shl 20
+
+private fun dayMonth(d: LocalDate) = String.format(Locale.US, "%02d-%02d-%d", d.dayOfMonth, d.monthValue, d.year)
+
+/** Respaldos diarios locales: elegir uno y confirmar antes de reemplazar la colección. */
+@Composable
+fun RestoreDialog(backups: List<Backup>, onDismiss: () -> Unit, onRestore: (Backup) -> Unit) {
+    var chosen by remember { mutableStateOf<Backup?>(null) }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Restaurar respaldo") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (backups.isEmpty()) {
+                    Text("Aún no hay respaldos. Se guarda uno por día al modificar la colección.", color = muted)
+                } else {
+                    Text("Se guarda uno por día; se conservan los últimos 7.", fontSize = 13.sp, color = muted)
+                    Spacer(Modifier.height(8.dp))
+                    for (b in backups) {
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { chosen = b }.padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(dayMonth(b.date), Modifier.weight(1f), maxLines = 1)
+                            Text("${b.cards} ${if (b.cards == 1) "carta" else "cartas"}", color = muted, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar", maxLines = 1) } },
+    )
+    chosen?.let { b ->
+        AlertDialog(
+            onDismissRequest = { chosen = null },
+            text = { Text("¿Reemplazar tu colección por el respaldo del ${dayMonth(b.date)} (${b.cards} cartas)?") },
+            confirmButton = { Button(onClick = { chosen = null; onRestore(b) }) { Text("Restaurar", maxLines = 1) } },
+            dismissButton = { TextButton(onClick = { chosen = null }) { Text("Cancelar", maxLines = 1) } },
+        )
+    }
 }
 
 private fun shareCsv(ctx: Context, entries: List<Entry>) {
@@ -471,14 +635,44 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
-    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+    var denied by rememberSaveable { mutableStateOf(false) } // ya se pidió y el usuario lo negó
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        granted = it
+        if (!it) denied = true
+    }
     LaunchedEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
+    // Al volver de los ajustes del sistema, revisar si ya lo dio
+    LifecycleResumeEffect(Unit) {
+        granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        onPauseOrDispose { }
+    }
 
     if (!granted) {
+        // Negado "para siempre": el sistema ya no muestra el diálogo, hay que ir a los ajustes de la app
+        val activity = ctx as? Activity
+        val blocked = denied && activity != null &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("El escáner necesita permiso de cámara.")
+            Text("El escáner necesita permiso de cámara.", textAlign = TextAlign.Center)
+            if (blocked) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Actívalo en Ajustes → Permisos → Cámara.",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
+                )
+            }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = { ask.launch(Manifest.permission.CAMERA) }) { Text("Dar permiso", maxLines = 1) }
+            Button(onClick = {
+                if (blocked) {
+                    runCatching {
+                        ctx.startActivity(
+                            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
+                        )
+                    }
+                } else {
+                    ask.launch(Manifest.permission.CAMERA)
+                }
+            }) { Text("Dar permiso", maxLines = 1) }
         }
         return
     }
@@ -735,6 +929,12 @@ fun AddDialog(card: CardInfo, fx: Double, onDismiss: () -> Unit, onAdd: (Boolean
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Normal ${usd(card.price(false))} · Foil ${usd(card.price(true))}", fontSize = 13.sp)
                     PriceNotes(card, foil)
+                    if (card.price(foil) == null) {
+                        Text(
+                            "Esta versión no tiene precio en ${if (foil) "foil" else "normal"} en TCGplayer",
+                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     card.price(foil)?.let { Text("${clp(it * qty * fx)} por ${qty}", fontSize = 13.sp, color = GOLD) }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -831,7 +1031,7 @@ fun EntryDialog(
 fun ManualPrice(manual: Double?, hasMarket: Boolean, onManual: (Double?) -> Unit) {
     val focus = LocalFocusManager.current
     var text by remember(manual) { mutableStateOf(manual?.let { plain(it) } ?: "") }
-    val parsed = text.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it > 0 }
+    val parsed = Collection.parsePrice(text) // finito y 0 < p ≤ 100.000; acepta "12,5" y "12.5"
     val canSave = parsed != null && parsed != manual
     fun save() {
         if (!canSave) return
@@ -929,6 +1129,25 @@ fun UpdateDialog(update: Update, onDismiss: () -> Unit) {
             .onFailure { error = "No se pudo abrir el instalador" }
     }
 
+    /** Reusar una descarga: se vuelve a verificar (fuera del hilo principal) justo antes de instalar. */
+    fun verifyAndInstall(f: File) {
+        error = null
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { Updater.verifyApk(ctx, f, update.code.toLong()) }
+                    .onFailure { f.delete() }
+                    .isSuccess
+            }
+            if (ok) {
+                install(f)
+            } else {
+                file = null
+                progress = null
+                error = Updater.NOT_VERIFIED
+            }
+        }
+    }
+
     fun download() {
         error = null
         progress = 0f
@@ -940,7 +1159,10 @@ fun UpdateDialog(update: Update, onDismiss: () -> Unit) {
                 }
             }
             r.onSuccess { file = it; install(it) }
-                .onFailure { progress = null; error = "Falló la descarga (${it.message})" }
+                .onFailure {
+                    progress = null
+                    error = if (it is VerificationException) Updater.NOT_VERIFIED else "Falló la descarga (${errorReason(it)})"
+                }
         }
     }
 
@@ -970,7 +1192,7 @@ fun UpdateDialog(update: Update, onDismiss: () -> Unit) {
         confirmButton = {
             val f = file
             if (f != null) {
-                Button(onClick = { error = null; install(f) }) { Text("Instalar", maxLines = 1) }
+                Button(onClick = { verifyAndInstall(f) }) { Text("Instalar", maxLines = 1) }
             } else {
                 Button(onClick = { download() }, enabled = !downloading) { Text("Descargar", maxLines = 1) }
             }

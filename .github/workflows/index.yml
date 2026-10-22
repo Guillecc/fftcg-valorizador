@@ -2,35 +2,73 @@ name: Índice de precios
 
 # Genera index.json.gz (cartas + precio de mercado TCGplayer vía tcgcsv.com) y lo publica en el
 # release fijo "index", que la app descarga al iniciar (si su copia tiene más de 12 h).
+# Además guarda el snapshot de precios del día en el release "history" (historial para h7/h30).
 on:
   schedule:
     - cron: "30 21 * * *" # diario, después de la actualización de tcgcsv (~20:00 UTC)
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  index:
+  # Solo lectura: aquí corre el código que procesa datos de terceros (tcgcsv, Materia Hunter)
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       # También revisa los códigos contra Materia Hunter y deja auditoria.md. Si esa revisión
-      # falla, el índice sale igual, solo con las correcciones manuales.
+      # falla, el índice sale igual, solo con las correcciones manuales. Si los datos no pasan la
+      # validación (cantidad de cartas/sets), el script sale con error y no se publica nada.
       - name: Generar índice
-        run: python build_index.py index.json.gz && ls -l index.json.gz
+        run: python build_index.py index.json.gz && ls -l index.json.gz history/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: indice
+          path: |
+            index.json.gz
+            auditoria.md
+            history/*.json.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publica: sin checkout ni código del repo, solo gh con permiso de escritura
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: indice
 
       - name: Publicar en el release "index"
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           gh release view index >/dev/null 2>&1 || gh release create index \
             --title "Índice de precios" --notes "Índice que descarga la app. Se actualiza solo cada día." \
             --prerelease --latest=false
           gh release upload index index.json.gz --clobber
           if [ -f auditoria.md ]; then gh release upload index auditoria.md --clobber || true; fi
+
+      # Si falla, el índice ya quedó publicado: solo se pierde el snapshot de hoy
+      - name: Guardar snapshot en el release "history"
+        continue-on-error: true
+        run: |
+          gh release view history >/dev/null 2>&1 || gh release create history \
+            --title "Historial de precios" \
+            --notes "Un archivo por día (AAAA-MM-DD.json.gz) con el precio de mercado {productId: [normal, foil]}." \
+            --prerelease --latest=false
+          gh release upload history history/*.json.gz --clobber

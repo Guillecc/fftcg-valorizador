@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copia de Android hasta API 30: solo la colección, sus respaldos diarios, las correcciones del escáner y el
+     dólar fijo. Al haber <include>, todo lo demás (índice, caché, actualizaciones) queda fuera. -->
+<full-backup-content>
+    <include domain="file" path="collection.json" />
+    <include domain="file" path="backups" />
+    <include domain="sharedpref" path="overrides.xml" />
+    <include domain="sharedpref" path="fx.xml" />
+</full-backup-content>

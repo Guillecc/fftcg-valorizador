@@ -17,27 +17,20 @@ android {
         targetSdk = 35
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        // Solo arm64 (el teléfono es un Xiaomi 14T): el modelo de ML Kit va para una sola ABI
+        // y el APK pesa mucho menos. No instala en teléfonos de 32 bits ni emuladores x86.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
-    // La llave de firma es privada: GitHub Actions la decodifica desde los secretos del repo.
-    // Sin esas variables (compilación local) el APK release queda sin firmar.
-    val keystorePath = System.getenv("SIGNING_KEYSTORE_PATH")
-    signingConfigs {
-        if (keystorePath != null) {
-            create("release") {
-                storeFile = file(keystorePath)
-                storeType = "pkcs12"
-                storePassword = System.getenv("SIGNING_PASSWORD")
-                keyAlias = "fftcg"
-                keyPassword = System.getenv("SIGNING_PASSWORD")
-            }
-        }
-    }
+    // Sin firma en Gradle: el release sale sin firmar (app-release-unsigned.apk) y lo firma el job
+    // "sign" de build.yml con apksigner, para que la llave nunca esté donde corre Gradle.
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            if (keystorePath != null) signingConfig = signingConfigs.getByName("release")
+            // R8: recorta código y recursos sin usar (APK más chico, Compose más fluido)
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 

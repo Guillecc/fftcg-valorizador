@@ -146,8 +146,10 @@ fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val reader = CodeReader(CardIndex::exists, CardIndex::plausiblePrefix)
         val providerFuture = ProcessCameraProvider.getInstance(ctx)
+        var disposed = false // listener y onDispose corren en el hilo principal
         providerFuture.addListener({
-            val provider = providerFuture.get()
+            if (disposed) return@addListener
+            val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
             val analysis = ImageAnalysis.Builder()
                 .setResolutionSelector(
@@ -181,7 +183,9 @@ fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier
         }, ContextCompat.getMainExecutor(ctx))
 
         onDispose {
-            runCatching { providerFuture.get().unbindAll() }
+            disposed = true
+            // Sin bloquear el hilo principal: si la cámara aún no abrió, el listener ya no la enlaza
+            if (providerFuture.isDone) runCatching { providerFuture.get().unbindAll() }
             recognizer.close()
             executor.shutdown()
         }

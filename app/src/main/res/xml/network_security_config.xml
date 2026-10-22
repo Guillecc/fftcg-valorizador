@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solo HTTPS, también en Android 8.x (API 26-27), donde el texto plano aún se permite por defecto. Sin pinning:
+     GitHub y su CDN rotan certificados y la app quedaría sin poder actualizarse. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
