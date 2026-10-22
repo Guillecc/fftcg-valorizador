@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.FFTCG" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF16181D</item>
+        <item name="android:statusBarColor">#FF16181D</item>
+        <item name="android:navigationBarColor">#FF16181D</item>
+    </style>
+</resources>
