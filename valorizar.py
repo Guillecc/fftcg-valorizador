@@ -29,7 +29,12 @@ CODE_RE = re.compile(r"^([A-Z0-9]+)-0*(\d+)([A-Z]?)$")
 
 # Errores conocidos en el número de colección que publica TCGplayer (productId -> código correcto)
 CORRECTIONS = {
-    539819: "PR-158",  # Snow & Lightning (Full Art) figura como PR-156
+    539819: "PR-158",  # Snow & Lightning (Full Art) figura como PR-156 (Zack)
+    678172: "PR-203/18-030H",  # Physalis Full Art promo, figura como Re-051H/18-030H
+    215567: "PR-071/10-007H",  # Zack promo, figura como "PR071/007H" (sin set)
+    483775: "1-033C",  # Argath (Deck Exclusive), figura como 1-032C (Chemist)
+    487575: "8-006L",  # Cloud Noir Promo figura como 8-143S; su nombre dice 8-006L
+    678173: "PR-205/25-118H",  # Golbez promo: le falta la parte PR
 }
 
 
