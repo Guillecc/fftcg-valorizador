@@ -74,6 +74,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.delay
 import java.util.concurrent.Executors
 import kotlin.math.PI
 import kotlin.math.min
@@ -117,21 +118,30 @@ class CodeReader(
     /** Devuelve un código confirmado, o null. */
     fun accept(text: String): ScanHit? {
         val (key, known) = codes(text).firstOrNull() ?: return null
+        // La misma carta sigue frente a la cámara tras reportarla: cada vez que se ve se renueva la espera,
+        // así solo vuelve a contar si sale del cuadro (~2,5 s sin verla) y se escanea de nuevo
+        val now = System.currentTimeMillis()
+        if (key == lastReported && now - reportedAt < 2500) {
+            reportedAt = now
+            hits = 0
+            return null
+        }
         if (key == last) hits++ else { last = key; hits = 1 }
         if (hits < if (known) 2 else 3) return null
         hits = 0
-        // La misma carta sigue frente a la cámara tras agregarla: no repetir por unos segundos
-        val now = System.currentTimeMillis()
-        if (key == lastReported && now - reportedAt < 4000) return null
         lastReported = key
         reportedAt = now
         return ScanHit(key, known, text)
     }
 }
 
+/**
+ * Cámara con lector de códigos. [paused] deja de leer y muestra el marco en verde; cada cambio de [flash]
+ * (modo Lote) muestra el verde ~700 ms sin pausar.
+ */
 @OptIn(ExperimentalGetImage::class)
 @Composable
-fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier = Modifier) {
+fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier = Modifier, flash: Int = 0) {
     val ctx = LocalContext.current
     val owner = LocalLifecycleOwner.current
     val currentOnCode by rememberUpdatedState(onCode)
@@ -140,6 +150,14 @@ fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier
     val previewView = remember { PreviewView(ctx) }
     var camera by remember { mutableStateOf<Camera?>(null) }
     var torch by remember { mutableStateOf(false) }
+    var flashing by remember { mutableStateOf(false) }
+    LaunchedEffect(flash) {
+        if (flash > 0) {
+            flashing = true
+            delay(700)
+            flashing = false
+        }
+    }
 
     DisposableEffect(owner) {
         val executor = Executors.newSingleThreadExecutor()
@@ -193,7 +211,7 @@ fun CameraScanner(paused: Boolean, onCode: (ScanHit) -> Unit, modifier: Modifier
 
     Box(modifier) {
         AndroidView({ previewView }, Modifier.fillMaxSize())
-        CardFrame(found = paused, modifier = Modifier.fillMaxSize())
+        CardFrame(found = paused || flashing, modifier = Modifier.fillMaxSize())
         Box(
             Modifier.align(Alignment.TopEnd).padding(8.dp).size(44.dp).clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.45f))

@@ -144,6 +144,7 @@ fun AppScreen() {
     var onAdded by remember { mutableStateOf<() -> Unit>({}) }
     var available by remember { mutableStateOf<Update?>(null) } // versión nueva: muestra el aviso en Colección
     var updating by remember { mutableStateOf<Update?>(null) } // diálogo de actualización abierto
+    val tray = remember { BatchTray() } // bandeja del modo Lote: sobrevive al cambio de pestaña
 
     fun persist() {
         Collection.saveAsync(ctx, entries.toList()) { e ->
@@ -256,7 +257,17 @@ fun AppScreen() {
                     }
                 }
                 tab == 1 -> SearchScreen(onPick = { adding = it; onAdded = {} })
-                else -> ScanScreen(onPick = { card, resume -> adding = card; onAdded = resume })
+                else -> ScanScreen(
+                    tray = tray,
+                    onPick = { card, resume -> adding = card; onAdded = resume },
+                    onAddMany = { list ->
+                        if (list.isNotEmpty()) {
+                            replace(list.fold(entries.toList()) { acc, e -> Collection.add(acc, e.id, e.foil, e.qty) })
+                            val n = list.sumOf { it.qty }
+                            scope.launch { snack.showSnackbar(if (n == 1) "Se agregó 1 carta" else "Se agregaron $n cartas") }
+                        }
+                    },
+                )
             }
         }
     }
@@ -688,7 +699,7 @@ fun CardItem(c: CardInfo, note: String? = null, onClick: () -> Unit) {
 // ------------------------------------------------------------------ Escanear
 
 @Composable
-fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
+fun ScanScreen(tray: BatchTray, onPick: (CardInfo, () -> Unit) -> Unit, onAddMany: (List<Entry>) -> Unit) {
     val ctx = LocalContext.current
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
@@ -735,6 +746,11 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
         return
     }
 
+    val prefs = remember { ctx.getSharedPreferences("ui", Context.MODE_PRIVATE) }
+    var batch by remember { mutableStateOf(prefs.getBoolean("scan_batch", false)) } // modo Lote
+    var flash by remember { mutableIntStateOf(0) } // modo Lote: cada escaneo destella el marco sin pausar
+    var resolving by remember { mutableStateOf<Long?>(null) } // modo Lote: línea de la bandeja que se está buscando
+    var choosing by remember { mutableStateOf<Long?>(null) } // modo Lote: línea con la hoja de versiones abierta
     var hit by remember { mutableStateOf<ScanHit?>(null) }
     var searching by remember { mutableStateOf(false) } // el usuario pidió buscar a mano ("¿No está? Buscar")
     var q by remember { mutableStateOf("") }
@@ -751,16 +767,55 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
         hit = null
         searching = false
         q = ""
+        resolving = null
     }
 
+    /** Modo Lote: abre el flujo de búsqueda del modo Una carta para resolver una línea de la bandeja. */
+    fun openSearch(t: TrayItem, search: Boolean) {
+        resolving = t.uid
+        hit = t.hit
+        searching = search
+        q = ""
+    }
+
+    /** Modo Lote: la cámara no se pausa; una carta clara se suma sola y el resto queda por resolver. */
+    fun batchHit(found: ScanHit) {
+        val r = scanResult(found)
+        tray.add(found, clearPick(found, r), unknown = r.byCode.isEmpty())
+        flash++
+    }
+
+    // Modo Lote sin búsqueda abierta: la bandeja reemplaza a la lista de candidatos
+    val showTray = batch && h == null
+
     Column(Modifier.fillMaxSize()) {
-        CameraScanner(
-            paused = h != null,
-            onCode = { hit = it; searching = false; q = "" },
-            // Al buscar, la cámara (pausada) cede espacio a los resultados
-            modifier = Modifier.fillMaxWidth().weight(if (showSearch) 0.5f else 1.5f),
+        ScanModeSwitch(
+            batch = batch,
+            onBatch = { b ->
+                if (b != batch) {
+                    batch = b
+                    prefs.edit().putBoolean("scan_batch", b).apply()
+                    reset()
+                }
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         )
-        Column(Modifier.fillMaxWidth().weight(1f).imePadding().padding(horizontal = 12.dp)) {
+        CameraScanner(
+            // En Lote, también mientras se elige una versión (para no sumar cartas detrás de la hoja)
+            paused = h != null || choosing != null,
+            onCode = { if (batch) batchHit(it) else { hit = it; searching = false; q = "" } },
+            // Al buscar, la cámara (pausada) cede espacio a los resultados
+            modifier = Modifier.fillMaxWidth().weight(if (showSearch) 0.5f else if (showTray) 1f else 1.5f),
+            flash = flash,
+        )
+        if (showTray) {
+            BatchPanel(
+                tray = tray,
+                onSave = { onAddMany(tray.takeResolved()) },
+                onOpen = { t -> if (t.unknown) openSearch(t, search = false) else choosing = t.uid },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+        } else Column(Modifier.fillMaxWidth().weight(1f).imePadding().padding(horizontal = 12.dp)) {
             val muted = MaterialTheme.colorScheme.onSurfaceVariant
             if (h == null || result == null) {
                 Text(
@@ -776,14 +831,24 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
                         if (unknown) "${h.key} no está en TCGplayer" else "$code · $n ${if (n == 1) "versión" else "versiones"}",
                         Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
-                    TextButton(onClick = { reset() }) { Text("Escanear otra", maxLines = 1, softWrap = false) }
+                    TextButton(onClick = { reset() }) {
+                        Text(if (resolving != null) "Volver" else "Escanear otra", maxLines = 1, softWrap = false)
+                    }
                 }
                 if (showSearch) SearchField(q, { q = it }, Modifier.fillMaxWidth().padding(bottom = 8.dp).focusRequester(focus))
                 // Al agregar una carta que no trae este código (o elegida por nombre/búsqueda), se recuerda la asociación
                 val pick: (CardInfo, Boolean) -> Unit = { c, learn ->
-                    onPick(c) {
+                    val target = resolving
+                    if (target != null) {
+                        // Modo Lote: la elegida va a la bandeja (sin diálogo), con el mismo aprendizaje
                         if (learn || h.key !in c.keys) CardIndex.remember(ctx, h.key, c.id)
+                        tray.resolve(target, c)
                         reset()
+                    } else {
+                        onPick(c) {
+                            if (learn || h.key !in c.keys) CardIndex.remember(ctx, h.key, c.id)
+                            reset()
+                        }
                     }
                 }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
@@ -814,6 +879,39 @@ fun ScanScreen(onPick: (CardInfo, () -> Unit) -> Unit) {
             }
         }
     }
+
+    // Modo Lote: hoja para elegir la versión de una línea ambigua
+    val chosen = choosing?.let { id -> tray.items.firstOrNull { it.uid == id } }
+    if (chosen != null) {
+        val r = remember(chosen.uid) { scanResult(chosen.hit) }
+        val key = chosen.hit.key
+        val byName = r.byName.map { it to true }
+        val byCode = r.byCode.map { it to false }
+        val nameFirst = !r.codeMatchesName && r.byName.isNotEmpty()
+        VersionSheet(
+            code = r.byCode.firstOrNull { key in it.keys }?.code?.substringBefore('/') ?: key,
+            versions = r.byCode.size,
+            options = if (nameFirst) byName + byCode else byCode + byName,
+            onPick = { c, learn ->
+                if (learn || key !in c.keys) CardIndex.remember(ctx, key, c.id)
+                tray.resolve(chosen.uid, c)
+                choosing = null
+            },
+            onSearch = { choosing = null; openSearch(chosen, search = true) },
+            onDismiss = { choosing = null },
+        )
+    }
+}
+
+/**
+ * Modo Lote: la carta si el escaneo no es ambiguo (la asociada por el usuario, la única versión cuyo nombre
+ * se leyó, o la única versión del código si el texto no sugiere otra carta); null si hay que elegir.
+ */
+private fun clearPick(hit: ScanHit, r: ScanResult): CardInfo? {
+    val pinned = CardIndex.overrideFor(hit.key)
+    r.byCode.firstOrNull { it.id == pinned }?.let { return it }
+    r.byCode.filter { CardIndex.nameInText(it, hit.text) }.singleOrNull()?.let { return it }
+    return r.byCode.singleOrNull()?.takeIf { r.byName.isEmpty() }
 }
 
 /** Candidatos de un escaneo: por código y, aparte, cartas cuyo nombre se leyó en la carta. */
