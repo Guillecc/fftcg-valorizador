@@ -43,6 +43,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -120,6 +121,8 @@ fun AppScreen() {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var adding by remember { mutableStateOf<CardInfo?>(null) }
     var onAdded by remember { mutableStateOf<() -> Unit>({}) }
+    var available by remember { mutableStateOf<Update?>(null) } // versión nueva: muestra el aviso en Colección
+    var updating by remember { mutableStateOf<Update?>(null) } // diálogo de actualización abierto
 
     fun persist() {
         val copy = entries.toList()
@@ -140,8 +143,23 @@ fun AppScreen() {
         fx = Fx.current(ctx)
     }
 
+    fun checkUpdate() {
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { runCatching { Updater.check(ctx) } }
+            r.onSuccess { u ->
+                if (u != null) {
+                    available = u
+                    updating = u
+                } else {
+                    snack.showSnackbar("Ya tienes la última versión (${Updater.installedVersion(ctx)})")
+                }
+            }.onFailure { snack.showSnackbar("No se pudo buscar actualización (${it.message})") }
+        }
+    }
+
     LaunchedEffect(Unit) {
         val saved = withContext(Dispatchers.IO) {
+            Updater.clean(ctx)
             CardIndex.load(ctx)
             runCatching { Collection.load(ctx) }.getOrDefault(emptyList())
         }
@@ -149,6 +167,8 @@ fun AppScreen() {
         indexVersion++
         loading = false
         refresh(force = false)
+        // Una vez por inicio (GitHub permite 60 consultas por hora sin cuenta); si falla, no se avisa
+        withContext(Dispatchers.IO) { runCatching { Updater.check(ctx) }.getOrNull() }?.let { available = it }
     }
 
     Scaffold(
@@ -176,15 +196,21 @@ fun AppScreen() {
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(onClick = { scope.launch { refresh(force = true) } }) { Text("Reintentar", maxLines = 1) }
                 }
-                tab == 0 -> CollectionScreen(
-                    entries = entries,
-                    version = version,
-                    fx = fx,
-                    onChange = { replace(it) },
-                    onFxChange = { Fx.setManual(ctx, it); fx = Fx.current(ctx) },
-                    onRefresh = { scope.launch { refresh(force = true); snack.showSnackbar("Precios al ${CardIndex.updated}") } },
-                    onMessage = { scope.launch { snack.showSnackbar(it) } },
-                )
+                tab == 0 -> Column(Modifier.fillMaxSize()) {
+                    available?.let { u -> UpdateBanner(u, onClick = { updating = u }) }
+                    Box(Modifier.weight(1f)) {
+                        CollectionScreen(
+                            entries = entries,
+                            version = version,
+                            fx = fx,
+                            onChange = { replace(it) },
+                            onFxChange = { Fx.setManual(ctx, it); fx = Fx.current(ctx) },
+                            onRefresh = { scope.launch { refresh(force = true); snack.showSnackbar("Precios al ${CardIndex.updated}") } },
+                            onCheckUpdate = { checkUpdate() },
+                            onMessage = { scope.launch { snack.showSnackbar(it) } },
+                        )
+                    }
+                }
                 tab == 1 -> SearchScreen(onPick = { adding = it; onAdded = {} })
                 else -> ScanScreen(onPick = { card, resume -> adding = card; onAdded = resume })
             }
@@ -204,6 +230,11 @@ fun AppScreen() {
             },
         )
     }
+
+    updating?.let { u ->
+        // "Ahora no" también oculta el aviso hasta el próximo inicio
+        UpdateDialog(update = u, onDismiss = { updating = null; available = null })
+    }
 }
 
 // ------------------------------------------------------------------ Colección
@@ -216,9 +247,11 @@ fun CollectionScreen(
     onChange: (List<Entry>) -> Unit,
     onFxChange: (Double?) -> Unit,
     onRefresh: () -> Unit,
+    onCheckUpdate: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val installed = remember { Updater.installedVersion(ctx) }
     val rows = remember(entries.toList(), version) {
         entries.map { it to CardIndex.byId(it.id) }
             .sortedByDescending { (e, c) -> c?.price(e.foil)?.times(e.qty) ?: -1.0 }
@@ -276,6 +309,18 @@ fun CollectionScreen(
                             DropdownMenuItem(
                                 text = { Text("Actualizar precios", maxLines = 1) },
                                 onClick = { menu = false; onRefresh() },
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("Buscar actualización", maxLines = 1)
+                                        Text(
+                                            "Tienes $installed", fontSize = 12.sp, maxLines = 1,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                onClick = { menu = false; onCheckUpdate() },
                             )
                         }
                     }
@@ -742,5 +787,92 @@ fun FxDialog(current: Double, onDismiss: () -> Unit, onSet: (Double?) -> Unit) {
             Button(onClick = { text.replace(',', '.').toDoubleOrNull()?.takeIf { it > 0 }?.let(onSet) }) { Text("Fijar", maxLines = 1) }
         },
         dismissButton = { TextButton(onClick = { onSet(null) }) { Text("Usar dólar del día", maxLines = 1) } },
+    )
+}
+
+// ------------------------------------------------------------------ Actualización
+
+/** Aviso delgado sobre la colección cuando hay una versión nueva. */
+@Composable
+fun UpdateBanner(update: Update, onClick: () -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp)) {
+        Row(Modifier.padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Nueva versión ${update.version} disponible",
+                Modifier.weight(1f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = onClick) { Text("Actualizar", maxLines = 1, softWrap = false) }
+        }
+    }
+}
+
+@Composable
+fun UpdateDialog(update: Update, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val installed = remember { Updater.installedVersion(ctx) }
+    var progress by remember { mutableStateOf<Float?>(null) } // null = sin descarga en curso
+    var file by remember { mutableStateOf<File?>(null) }
+    var needsPermission by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val downloading = progress != null && file == null
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+
+    fun install(f: File) {
+        runCatching { Updater.install(ctx, f) }
+            .onSuccess { needsPermission = !it }
+            .onFailure { error = "No se pudo abrir el instalador" }
+    }
+
+    fun download() {
+        error = null
+        progress = 0f
+        scope.launch {
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    // El avance llega desde el hilo de IO: se aplica en el hilo principal
+                    Updater.download(ctx, update) { p -> scope.launch { if (file == null && progress != null) progress = p } }
+                }
+            }
+            r.onSuccess { file = it; install(it) }
+                .onFailure { progress = null; error = "Falló la descarga (${it.message})" }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!downloading) onDismiss() },
+        title = { Text("Actualizar a ${update.version}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val mb = String.format(Locale.forLanguageTag("es-CL"), "%.1f", update.size / 1_048_576.0)
+                Text("Tienes $installed" + if (update.size > 0) " · descarga de $mb MB" else "", fontSize = 14.sp, color = muted)
+                val p = progress
+                if (downloading && p != null) {
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth())
+                    Text("Descargando… ${(p * 100).toInt()} %", fontSize = 13.sp, color = muted)
+                }
+                if (file != null) {
+                    Text(
+                        if (needsPermission) "Permite instalar apps desde FFTCG Valor y vuelve a tocar Instalar"
+                        else "Descarga lista. Confirma en el instalador; tu colección se mantiene.",
+                        fontSize = 14.sp,
+                    )
+                }
+                error?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            val f = file
+            if (f != null) {
+                Button(onClick = { error = null; install(f) }) { Text("Instalar", maxLines = 1) }
+            } else {
+                Button(onClick = { download() }, enabled = !downloading) { Text("Descargar", maxLines = 1) }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !downloading) { Text(if (file != null) "Cerrar" else "Ahora no", maxLines = 1) }
+        },
     )
 }
