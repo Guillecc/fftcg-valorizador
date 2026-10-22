@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      # También revisa los códigos contra Materia Hunter y deja auditoria.md. Si esa revisión
+      # falla, el índice sale igual, solo con las correcciones manuales.
       - name: Generar índice
         run: python build_index.py index.json.gz && ls -l index.json.gz
 
@@ -31,3 +33,4 @@ jobs:
             --title "Índice de precios" --notes "Índice que descarga la app. Se actualiza solo cada día." \
             --prerelease --latest=false
           gh release upload index index.json.gz --clobber
+          if [ -f auditoria.md ]; then gh release upload index auditoria.md --clobber || true; fi

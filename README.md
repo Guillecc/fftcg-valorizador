@@ -68,3 +68,8 @@ Requiere solo Python 3.10+. No hay que instalar nada más.
 - Un mismo código puede tener varias versiones (base, Full Art, promo). La columna `nota` avisa
   cuando hubo que elegir, y `otras_versiones` lista las alternativas.
 - Si un código se reimprimió en otro set, se prefiere el set que indica el código (`26-003R` → set 26).
+- Cada día `auditoria.py` compara los códigos de TCGplayer con la lista de Materia Hunter. Solo corrige
+  sola los errores claros (el nombre del producto trae el código, formato `PR165`, o el código es de otra
+  carta y la correcta está al lado). Las correcciones manuales (`CORRECTIONS`) mandan.
+- El resultado queda en `auditoria.md`, en el release `index`, con los casos para revisar a mano. Si
+  Materia Hunter no responde, el índice se publica igual, solo con las correcciones manuales.

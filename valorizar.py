@@ -103,12 +103,15 @@ def set_matches(prefix: str, abbr: str) -> bool:
     return abbr in (prefix, f"OP{prefix}")
 
 
-def build_index(catalog: dict) -> tuple[dict, dict]:
-    """index[(set, nro)] -> lista de productos; prices[(productId, subtipo)] -> precio."""
+def build_index(catalog: dict, auto: dict | None = None) -> tuple[dict, dict]:
+    """index[(set, nro)] -> lista de productos; prices[(productId, subtipo)] -> precio.
+
+    auto: correcciones de auditoria.py; las manuales (CORRECTIONS) tienen prioridad."""
+    fixes = {**(auto or {}), **CORRECTIONS}
     index: dict[tuple[str, int], list[dict]] = {}
     for p in catalog["products"]:
         ext = {e["name"]: e["value"] for e in p.get("extendedData", [])}
-        number = CORRECTIONS.get(p["productId"], ext.get("Number"))
+        number = fixes.get(p["productId"], ext.get("Number"))
         if not number:
             continue  # productos sellados (boosters, cajas)
         p["_number"], p["_rarity"] = number, ext.get("Rarity", "")
@@ -167,8 +170,8 @@ def read_collection(path: Path) -> list[Row]:
     return rows
 
 
-def valorize(rows: list[Row], catalog: dict, fx: float) -> None:
-    index, prices = build_index(catalog)
+def valorize(rows: list[Row], catalog: dict, fx: float, auto: dict | None = None) -> None:
+    index, prices = build_index(catalog, auto)
     groups = catalog["groups"]
     for r in rows:
         key = code_key(r.codigo)
@@ -274,7 +277,14 @@ def main() -> None:
             sys.exit(f"No pude obtener el dólar ({ex}). Usa --fx, por ejemplo --fx 950")
 
     print("Cargando precios de TCGplayer…", file=sys.stderr)
-    valorize(rows, load_catalog(args.refresh), fx)
+    catalog = load_catalog(args.refresh)
+    auto = {}
+    try:  # opcional: si falla, quedan solo las correcciones manuales
+        from auditoria import auditar
+        auto = auditar(catalog, HERE / "cache")[0]
+    except Exception as ex:
+        print(f"  (sin revisión automática de códigos: {ex})", file=sys.stderr)
+    valorize(rows, catalog, fx, auto)
 
     total_usd = round(sum(r.total_usd or 0 for r in rows), 2)
     out = HERE / "resultados"
