@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -34,6 +35,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -75,7 +77,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -254,11 +258,12 @@ fun CollectionScreen(
     val installed = remember { Updater.installedVersion(ctx) }
     val rows = remember(entries.toList(), version) {
         entries.map { it to CardIndex.byId(it.id) }
-            .sortedByDescending { (e, c) -> c?.price(e.foil)?.times(e.qty) ?: -1.0 }
+            .sortedByDescending { (e, c) -> e.unit(c)?.times(e.qty) ?: -1.0 }
     }
-    val totalUsd = rows.sumOf { (e, c) -> (c?.price(e.foil) ?: 0.0) * e.qty }
-    val missing = rows.count { (e, c) -> c?.price(e.foil) == null }
-    var detail by remember { mutableStateOf<Entry?>(null) }
+    val totalUsd = rows.sumOf { (e, c) -> (e.unit(c) ?: 0.0) * e.qty }
+    val missing = rows.count { (e, c) -> e.unit(c) == null }
+    // Se guarda la clave (id, foil) para que el diálogo siempre muestre la versión actual de la línea
+    var detail by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     var editFx by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
@@ -267,17 +272,59 @@ fun CollectionScreen(
         val text = runCatching { ctx.contentResolver.openInputStream(uri)!!.bufferedReader().use { it.readText() } }.getOrNull()
         if (text == null) { onMessage("No se pudo leer el archivo"); return@rememberLauncherForActivityResult }
         val (ok, failed) = Collection.fromCsv(text)
-        onChange(ok.fold(entries.toList()) { acc, e -> Collection.add(acc, e.id, e.foil, e.qty) })
+        onChange(ok.fold(entries.toList()) { acc, e -> Collection.add(acc, e.id, e.foil, e.qty, e.manual) })
         onMessage("Importadas ${ok.size} líneas" + if (failed.isEmpty()) "" else ". Sin match: ${failed.joinToString(", ")}")
     }
 
     LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Card(Modifier.fillMaxWidth()) {
-                Box(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("Valor de la colección", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(usd(totalUsd), fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                    // Encabezado: título y menú en la misma fila, centrados verticalmente
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Valor de la colección", Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        // Acciones en un menú para que no se amontonen en pantallas angostas
+                        Box {
+                            IconButton(onClick = { menu = true }) {
+                                Icon(AppIcons.MoreVert, contentDescription = "Más opciones", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Importar CSV", maxLines = 1) },
+                                    onClick = { menu = false; importer.launch(arrayOf("*/*")) },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Exportar CSV", maxLines = 1) },
+                                    onClick = { menu = false; shareCsv(ctx, entries) },
+                                    enabled = entries.isNotEmpty(),
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Actualizar precios", maxLines = 1) },
+                                    onClick = { menu = false; onRefresh() },
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text("Buscar actualización", maxLines = 1)
+                                            Text(
+                                                "Tienes $installed", fontSize = 12.sp, maxLines = 1,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    },
+                                    onClick = { menu = false; onCheckUpdate() },
+                                )
+                            }
+                        }
+                    }
+                    Column(Modifier.padding(horizontal = 16.dp)) {
+                        Text(usd(totalUsd), fontSize = 30.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         Text(clp(totalUsd * fx), fontSize = 20.sp, color = GOLD)
                         Spacer(Modifier.height(6.dp))
                         Text(
@@ -291,39 +338,6 @@ fun CollectionScreen(
                             modifier = Modifier.clickable { editFx = true }.padding(vertical = 4.dp),
                         )
                     }
-                    // Acciones en un menú para que no se amontonen en pantallas angostas
-                    Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
-                        IconButton(onClick = { menu = true }) {
-                            Icon(AppIcons.MoreVert, contentDescription = "Más opciones", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Importar CSV", maxLines = 1) },
-                                onClick = { menu = false; importer.launch(arrayOf("*/*")) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Exportar CSV", maxLines = 1) },
-                                onClick = { menu = false; shareCsv(ctx, entries) },
-                                enabled = entries.isNotEmpty(),
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Actualizar precios", maxLines = 1) },
-                                onClick = { menu = false; onRefresh() },
-                            )
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text("Buscar actualización", maxLines = 1)
-                                        Text(
-                                            "Tienes $installed", fontSize = 12.sp, maxLines = 1,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                },
-                                onClick = { menu = false; onCheckUpdate() },
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -334,7 +348,7 @@ fun CollectionScreen(
             )
         }
         itemsIndexed(rows, key = { _, (e, _) -> "${e.id}-${e.foil}" }) { i, (e, c) ->
-            val unit = c?.price(e.foil)
+            val unit = e.unit(c)
             CardRow(
                 card = c,
                 title = (if (unit != null && i < 10) "#${i + 1} " else "") + (c?.name ?: "Carta ${e.id}"),
@@ -342,26 +356,30 @@ fun CollectionScreen(
                 foil = e.foil,
                 right = usd(unit?.times(e.qty)),
                 rightSub = "×${e.qty} · ${usd(unit)}",
+                rightNote = if (e.manual != null) "manual" else null,
                 warning = c != null && c.finish(e.foil) != null && !c.inStock(e.foil),
-                onClick = { detail = e },
+                onClick = { detail = e.id to e.foil },
             )
         }
     }
 
-    detail?.let { e ->
-        val c = CardIndex.byId(e.id)
+    val opened = detail?.let { (id, foil) -> entries.firstOrNull { it.id == id && it.foil == foil } }
+    if (opened != null) {
+        // Reemplaza (o quita, con null) la línea abierta en el diálogo
+        val update: (Entry?) -> Unit = { new ->
+            val list = entries.toMutableList()
+            val i = list.indexOfFirst { it.id == opened.id && it.foil == opened.foil }
+            if (i >= 0) {
+                if (new == null) list.removeAt(i) else list[i] = new
+                onChange(list)
+            }
+        }
         EntryDialog(
-            entry = e, card = c, fx = fx,
+            entry = opened, card = CardIndex.byId(opened.id), fx = fx,
             onDismiss = { detail = null },
-            onQty = { q ->
-                val list = entries.toMutableList()
-                val i = list.indexOf(e)
-                if (i >= 0) {
-                    if (q <= 0) list.removeAt(i) else list[i] = e.copy(qty = q)
-                    onChange(list)
-                }
-                detail = if (q <= 0) null else e.copy(qty = q)
-            },
+            onQty = { q -> update(opened.copy(qty = q)) },
+            onManual = { m -> update(opened.copy(manual = m)) },
+            onRemove = { update(null); detail = null },
         )
     }
     if (editFx) FxDialog(current = fx, onDismiss = { editFx = false }, onSet = { onFxChange(it); editFx = false })
@@ -578,6 +596,7 @@ fun CardRow(
     rightSub: String,
     onClick: () -> Unit,
     rightTag: String? = null,
+    rightNote: String? = null,
     warning: Boolean = false,
     note: String? = null,
 ) {
@@ -605,6 +624,7 @@ fun CardRow(
                     Text(right, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
                 if (rightSub.isNotEmpty()) Text(rightSub, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                if (rightNote != null) Text(rightNote, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
         }
     }
@@ -737,11 +757,23 @@ fun AddDialog(card: CardInfo, fx: Double, onDismiss: () -> Unit, onAdd: (Boolean
 }
 
 @Composable
-fun EntryDialog(entry: Entry, card: CardInfo?, fx: Double, onDismiss: () -> Unit, onQty: (Int) -> Unit) {
-    val unit = card?.price(entry.foil)
+fun EntryDialog(
+    entry: Entry,
+    card: CardInfo?,
+    fx: Double,
+    onDismiss: () -> Unit,
+    onQty: (Int) -> Unit,
+    onManual: (Double?) -> Unit,
+    onRemove: () -> Unit,
+) {
+    val market = card?.price(entry.foil)
+    val unit = entry.unit(card)
+    val name = card?.name ?: "Carta ${entry.id}"
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    var confirmRemove by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(card?.name ?: "Carta ${entry.id}") },
+        title = { Text(name) },
         text = {
             DetailBlock {
                 BigCard(card)
@@ -749,26 +781,95 @@ fun EntryDialog(entry: Entry, card: CardInfo?, fx: Double, onDismiss: () -> Unit
                 CardInfoRows(card, finish = if (entry.foil) "Foil" else "Normal")
                 Spacer(Modifier.height(12.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Precio de mercado: ${usd(unit)} c/u", fontSize = 13.sp)
-                    if (card != null) PriceNotes(card, entry.foil)
+                    if (entry.manual != null) {
+                        Text("Precio manual: ${usd(entry.manual)} c/u", fontSize = 13.sp)
+                        Text("Mercado TCGplayer: ${usd(market)} c/u", fontSize = 12.sp, color = muted)
+                    } else {
+                        Text("Precio de mercado: ${usd(market)} c/u", fontSize = 13.sp)
+                        if (card != null) PriceNotes(card, entry.foil)
+                    }
                     unit?.let { Text("Total: ${usd(it * entry.qty)} · ${clp(it * entry.qty * fx)}", fontSize = 13.sp, color = GOLD) }
                 }
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Copias", Modifier.weight(1f))
-                    QtyPicker(entry.qty, onQty, min = 0)
+                    QtyPicker(entry.qty, onQty)
                 }
-                Spacer(Modifier.height(4.dp))
-                Text("En 0 se quita de la colección.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                ManualPrice(manual = entry.manual, hasMarket = market != null, onManual = onManual)
                 if (card != null) {
                     Spacer(Modifier.height(16.dp))
                     LinkButtons(card, entry.foil)
+                }
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TextButton(onClick = { confirmRemove = true }) {
+                        Text("Quitar de la colección", color = MaterialTheme.colorScheme.error, maxLines = 1, softWrap = false)
+                    }
                 }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar", maxLines = 1) } },
     )
+
+    if (confirmRemove) {
+        AlertDialog(
+            onDismissRequest = { confirmRemove = false },
+            text = { Text("¿Quitar $name${if (entry.foil) " (foil)" else ""}?") },
+            confirmButton = {
+                TextButton(onClick = { confirmRemove = false; onRemove() }) {
+                    Text("Quitar", color = MaterialTheme.colorScheme.error, maxLines = 1)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemove = false }) { Text("Cancelar", maxLines = 1) } },
+        )
+    }
 }
+
+/** Precio por copia anotado a mano (ej: última venta), para cartas sin precio en TCGplayer o para reemplazarlo. */
+@Composable
+fun ManualPrice(manual: Double?, hasMarket: Boolean, onManual: (Double?) -> Unit) {
+    val focus = LocalFocusManager.current
+    var text by remember(manual) { mutableStateOf(manual?.let { plain(it) } ?: "") }
+    val parsed = text.trim().replace(',', '.').toDoubleOrNull()?.takeIf { it > 0 }
+    val canSave = parsed != null && parsed != manual
+    fun save() {
+        if (!canSave) return
+        focus.clearFocus()
+        onManual(parsed)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Precio manual (US$)")
+        Text(
+            if (hasMarket) "Opcional: reemplaza el precio de mercado"
+            else "TCGplayer no tiene precio para esta carta. Revisa la última venta en TCGplayer o eBay y anótala aquí.",
+            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it },
+                placeholder = { Text("ej: 999", maxLines = 1) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { save() }),
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = { save() }, enabled = canSave,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            ) { Text("Guardar", maxLines = 1, softWrap = false) }
+        }
+        if (manual != null) {
+            TextButton(onClick = { focus.clearFocus(); onManual(null) }) {
+                Text("Quitar precio manual", maxLines = 1, softWrap = false)
+            }
+        }
+    }
+}
+
+/** 999.0 -> "999", 12.5 -> "12.5": sin decimales sobrantes en el campo. */
+private fun plain(v: Double): String = if (v % 1.0 == 0.0) v.toLong().toString() else v.toString()
 
 @Composable
 fun FxDialog(current: Double, onDismiss: () -> Unit, onSet: (Double?) -> Unit) {
@@ -796,7 +897,10 @@ fun FxDialog(current: Double, onDismiss: () -> Unit, onSet: (Double?) -> Unit) {
 @Composable
 fun UpdateBanner(update: Update, onClick: () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp)) {
-        Row(Modifier.padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
                 "Nueva versión ${update.version} disponible",
                 Modifier.weight(1f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
